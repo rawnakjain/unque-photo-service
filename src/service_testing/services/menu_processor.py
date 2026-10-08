@@ -1,29 +1,30 @@
-"""Orchestrator combining Gemini Vision extraction and MongoDB Hybrid RAG variation matching."""
+"""Orchestrator combining Gemini Vision extraction and MongoDB Atlas Fuzzy Search for services & variations."""
 
 import logging
 import time
 from typing import Optional
 
-from service_testing.config import settings
 from service_testing.schemas import (
     MenuProcessingResponse,
     ProcessedMenuItem,
     VariationRecommendation,
 )
+from service_testing.services.fuzzy_search import FuzzySearchService
 from service_testing.services.gemini_extractor import GeminiExtractorService
-from service_testing.services.mongo_search import MongoSearchService
 
 logger = logging.getLogger(__name__)
+
+MIN_CONFIDENCE = 80
 
 
 class MenuProcessorService:
     def __init__(
         self,
         gemini_extractor: Optional[GeminiExtractorService] = None,
-        mongo_search: Optional[MongoSearchService] = None,
+        fuzzy_search: Optional[FuzzySearchService] = None,
     ):
         self.gemini_extractor = gemini_extractor or GeminiExtractorService()
-        self.mongo_search = mongo_search or MongoSearchService()
+        self.fuzzy_search = fuzzy_search or FuzzySearchService()
 
     def process_menu_image(
         self,
@@ -34,8 +35,11 @@ class MenuProcessorService:
     ) -> MenuProcessingResponse:
         """
         1. Calls Gemini to extract items from image.
-        2. For each extracted variation, performs Atlas Hybrid Search.
-        3. Assembles top 5 recommendations with pre-selection.
+        2. For each extracted item:
+           a. Fuzzy search service in salonservices collection using item.service
+           b. Fuzzy search variation in salonservicevariations collection using item.service_variation
+        3. Applies 80% confidence threshold.
+        4. Returns separate service and variation recommendations.
         """
         start_time = time.time()
 
@@ -47,39 +51,65 @@ class MenuProcessorService:
 
         processed_items: list[ProcessedMenuItem] = []
 
-        # Step 2: Hybrid RAG Matching for each item
+        # Step 2: Fuzzy Search Matching for each item
         for item in extraction_res.items:
-            # Query the database with the extracted variation name
-            query_text = item.service_variation.strip()
-            if not query_text:
-                query_text = item.service.replace("_", " ")
+            # Step 2a: Search for service in salonservices collection
+            service_query = item.service.strip()
+            service_recs: list[VariationRecommendation] = []
+            if service_query:
+                try:
+                    service_recs = self.fuzzy_search.recommend_services(
+                        query=service_query,
+                        top_k=top_k_recommendations,
+                        min_confidence=MIN_CONFIDENCE,
+                    )
+                except Exception as e:
+                    logger.error(f"Error searching services for '{service_query}': {e}")
 
-            recommendations: list[VariationRecommendation] = []
-            try:
-                recommendations = self.mongo_search.recommend_variations(
-                    query=query_text,
-                    top_k=top_k_recommendations,
-                )
-            except Exception as e:
-                logger.error(f"Error retrieving recommendations for '{query_text}': {e}")
-                # Provide a graceful fallback candidate
-                recommendations = [
+            # Step 2b: Search for variation in salonservicevariations collection
+            variation_query = item.service_variation.strip()
+            variation_recs: list[VariationRecommendation] = []
+            if variation_query:
+                try:
+                    variation_recs = self.fuzzy_search.recommend_variations(
+                        query=variation_query,
+                        top_k=top_k_recommendations,
+                        min_confidence=MIN_CONFIDENCE,
+                    )
+                except Exception as e:
+                    logger.error(f"Error searching variations for '{variation_query}': {e}")
+
+            # Combined recommendations for backwards compatibility (sorted by similarity)
+            all_recommendations = service_recs + variation_recs
+            all_recommendations.sort(key=lambda x: x.similarity_percentage or 0, reverse=True)
+            combined_recs = all_recommendations[:top_k_recommendations]
+
+            # If no recommendations meet confidence threshold, provide fallback
+            if not combined_recs:
+                logger.warning(f"No recommendations above {MIN_CONFIDENCE}% confidence for '{variation_query or service_query}'")
+                combined_recs = [
                     VariationRecommendation(
-                        variationName=query_text,
-                        score=1.0,
-                        similarity_percentage=90,
+                        variationName=variation_query or service_query,
+                        score=0.0,
+                        similarity_percentage=0,
                     )
                 ]
 
-            top_rec_id = recommendations[0].variationId if recommendations else None
-            top_rec_name = recommendations[0].variationName if recommendations else query_text
+            # Select top service and variation
+            top_service = service_recs[0] if service_recs else None
+            top_variation = variation_recs[0] if variation_recs else None
+            top_combined = combined_recs[0] if combined_recs else None
 
             processed_items.append(
                 ProcessedMenuItem(
                     extracted=item,
-                    recommendations=recommendations,
-                    selected_variation_id=top_rec_id,
-                    selected_variation_name=top_rec_name,
+                    service_recommendations=service_recs,
+                    variation_recommendations=variation_recs,
+                    recommendations=combined_recs,  # backwards compat
+                    selected_service_id=top_service.serviceId if top_service else None,
+                    selected_service_name=top_service.variationName if top_service else service_query,
+                    selected_variation_id=top_variation.variationId if top_variation else (top_combined.variationId if top_combined else None),
+                    selected_variation_name=top_variation.variationName if top_variation else (top_combined.variationName if top_combined else (variation_query or service_query)),
                 )
             )
 

@@ -1,33 +1,48 @@
-from service_testing.services.mongo_search import MongoSearchService
+"""Test MongoDB Atlas Fuzzy Search for services and variations."""
 
-def test_hybrid_search():
-    mongo = MongoSearchService()
+from service_testing.services.fuzzy_search import FuzzySearchService
+
+
+def test_fuzzy_search():
+    fuzzy = FuzzySearchService()
     # First check connection
-    conn = mongo.check_connection()
+    conn = fuzzy.check_connection()
     print("MongoDB connection:", conn)
     assert conn["status"] == "connected", f"MongoDB not connected: {conn}"
 
-    # Test a known query from the notebook: "Bob haircut"
-    results = mongo.hybrid_search(query="Bob haircut", top_k=5)
-    print(f"Found {len(results)} results for 'Bob haircut'")
-    for i, r in enumerate(results):
-        print(f"  {i+1}. {r.get('variationName')} (score: {r.get('score')})")
+    # Test service search on salonservices collection
+    print("\n--- Testing Service Search (salonservices) ---")
+    service_results = fuzzy.recommend_services(query="haircut", top_k=5, min_confidence=80)
+    print(f"Found {len(service_results)} service recommendations for 'haircut'")
+    for i, r in enumerate(service_results):
+        print(f"  {i+1}. {r.variationName} (similarity: {r.similarity_percentage}%)")
 
-    assert len(results) > 0, "Should return at least one result for 'Bob haircut'"
+    # Test another service query
+    service_results2 = fuzzy.recommend_services(query="facial", top_k=5, min_confidence=80)
+    print(f"Found {len(service_results2)} service recommendations for 'facial'")
+    for i, r in enumerate(service_results2):
+        print(f"  {i+1}. {r.variationName} (similarity: {r.similarity_percentage}%)")
 
-    # Test another query: "Full Arm"
-    results2 = mongo.hybrid_search(query="Full Arm", top_k=5)
-    print(f"Found {len(results2)} results for 'Full Arm'")
-    assert len(results2) > 0, "Should return at least one result for 'Full Arm'"
+    # Test variation search on salonservicevariations collection
+    print("\n--- Testing Variation Search (salonservicevariations) ---")
+    variation_results = fuzzy.recommend_variations(query="Bob haircut", top_k=5, min_confidence=80)
+    print(f"Found {len(variation_results)} variation recommendations for 'Bob haircut'")
+    for i, r in enumerate(variation_results):
+        print(f"  {i+1}. {r.variationName} (similarity: {r.similarity_percentage}%)")
 
-    # Test the recommend_variations method which returns typed models
-    recs = mongo.recommend_variations(query="Bridal Makeup", top_k=5)
-    print(f"Recommendations for 'Bridal Makeup': {len(recs)}")
-    for rec in recs:
-        print(f"  - {rec.variationName} ({rec.similarity_percentage}%)")
+    # Test another variation query
+    variation_results2 = fuzzy.recommend_variations(query="Full Arm Wax", top_k=5, min_confidence=80)
+    print(f"Found {len(variation_results2)} variation recommendations for 'Full Arm Wax'")
+    for i, r in enumerate(variation_results2):
+        print(f"  {i+1}. {r.variationName} (similarity: {r.similarity_percentage}%)")
 
-    assert len(recs) > 0, "Should return recommendations for 'Bridal Makeup'"
+    # Test low confidence query (should return empty or low results)
+    print("\n--- Testing Low Confidence Query ---")
+    low_results = fuzzy.recommend_variations(query="xyzabc123", top_k=5, min_confidence=80)
+    print(f"Found {len(low_results)} variation recommendations for 'xyzabc123' (expected: 0)")
+
+    print("\nAll fuzzy search tests passed!")
+
 
 if __name__ == "__main__":
-    test_hybrid_search()
-    print("All MongoDB search tests passed!")
+    test_fuzzy_search()

@@ -1,4 +1,4 @@
-"""Pydantic schemas for salon service extraction and hybrid matching."""
+"""Pydantic schemas for salon service extraction and fuzzy matching."""
 
 from enum import Enum
 from typing import Optional
@@ -67,15 +67,32 @@ class VariationRecommendation(BaseModel):
 
 
 class ProcessedMenuItem(BaseModel):
-    """An extracted menu item together with top-5 database recommendations."""
+    """An extracted menu item together with top-5 database recommendations for both service and variation."""
     extracted: ExtractedMenuItem
+    service_recommendations: list[VariationRecommendation] = Field(
+        default_factory=list,
+        description="Top 5 recommended service matches from salonservices collection",
+    )
+    variation_recommendations: list[VariationRecommendation] = Field(
+        default_factory=list,
+        description="Top 5 recommended variation matches from salonservicevariations collection",
+    )
+    # For backwards compatibility - combined top recommendations
     recommendations: list[VariationRecommendation] = Field(
         default_factory=list,
-        description="Top 5 recommended matches from MongoDB hybrid RAG",
+        description="Combined top recommendations (deprecated, use service_recommendations/variation_recommendations)",
+    )
+    selected_service_id: Optional[str] = Field(
+        None,
+        description="The serviceId chosen by the salon owner (defaults to top service recommendation)",
+    )
+    selected_service_name: Optional[str] = Field(
+        None,
+        description="The service name chosen by the salon owner",
     )
     selected_variation_id: Optional[str] = Field(
         None,
-        description="The variationId chosen by the salon owner (defaults to top recommendation)",
+        description="The variationId chosen by the salon owner (defaults to top variation recommendation)",
     )
     selected_variation_name: Optional[str] = Field(
         None,

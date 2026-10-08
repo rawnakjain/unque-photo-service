@@ -17,11 +17,16 @@ class Settings(BaseSettings):
     # MongoDB Atlas settings
     mongodb_uri: str = "mongodb+srv://praunak_db_user:mXxGITnLvIwEaRiB@photo-service.1sd1wva.mongodb.net/?appName=photo-service"
     mongodb_db_name: str = "Unque"
-    mongodb_collection: str = "variation_embeddings"
-    mongodb_vector_index: str = "vector_index"
-    mongodb_text_index: str = "text_index"
 
-    # Embedding model settings
+    # Collections for fuzzy search
+    salonservices_collection: str = "salonservices"
+    salonservicevariations_collection: str = "salonservicevariations"
+
+    # Text index names for fuzzy search
+    salonservices_text_index: str = "salonservices_index"
+    salonservicevariations_text_index: str = "salonservicevariations_index"
+
+    # Embedding model settings (kept for potential future use)
     embedding_model_name: str = "BAAI/bge-m3"
     embedding_device: str = "cpu"
 
