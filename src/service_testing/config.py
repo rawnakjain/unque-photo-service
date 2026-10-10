@@ -10,9 +10,10 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # Gemini settings
-    gemini_api_key: str = ""
+    # Vertex AI (Gemini) settings
     gemini_model: str = "gemini-2.5-flash"
+    gcp_project_id: str = "magnetic-alloy-448111-e7"
+    gcp_location: str = "us-central1"
 
     # MongoDB Atlas settings
     mongodb_uri: str = "mongodb+srv://praunak_db_user:mXxGITnLvIwEaRiB@photo-service.1sd1wva.mongodb.net/?appName=photo-service"

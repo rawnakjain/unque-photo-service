@@ -100,7 +100,7 @@ class FuzzySearchService:
                                     "path": "salonServiceName",
                                     "fuzzy": {
                                         "maxEdits": 2,
-                                        "prefixLength": 0,
+                                        "prefixLength": 1,
                                         "maxExpansions": 50
                                     }
                                 }
@@ -111,7 +111,7 @@ class FuzzySearchService:
                                     "path": "serviceNameEnum",
                                     "fuzzy": {
                                         "maxEdits": 2,
-                                        "prefixLength": 0,
+                                        "prefixLength": 1,
                                         "maxExpansions": 50
                                     }
                                 }
@@ -208,7 +208,7 @@ class FuzzySearchService:
                                     "path": "fullName",
                                     "fuzzy": {
                                         "maxEdits": 2,
-                                        "prefixLength": 0,
+                                        "prefixLength": 1,
                                         "maxExpansions": 50
                                     }
                                 }
@@ -219,7 +219,7 @@ class FuzzySearchService:
                                     "path": "salonServiceName",
                                     "fuzzy": {
                                         "maxEdits": 2,
-                                        "prefixLength": 0,
+                                        "prefixLength": 1,
                                         "maxExpansions": 50
                                     }
                                 }
@@ -230,7 +230,7 @@ class FuzzySearchService:
                                     "path": "comment",
                                     "fuzzy": {
                                         "maxEdits": 2,
-                                        "prefixLength": 0,
+                                        "prefixLength": 1,
                                         "maxExpansions": 50
                                     }
                                 }
