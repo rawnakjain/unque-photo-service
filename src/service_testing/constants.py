@@ -1,4 +1,5 @@
 """Fixed categories and constants for salon management POC."""
+"""Fixed categories and constants for salon management POC."""
 
 # Predefined fixed set of standard service categories
 STANDARD_SERVICES: list[str] = [

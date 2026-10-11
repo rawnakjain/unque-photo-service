@@ -30,6 +30,47 @@ def _build_regex_or_conditions(query: str, fields: list[str]) -> dict:
             or_conditions.append({field: {"$regex": escaped, "$options": "i"}})
     return {"$or": or_conditions}
 
+def _is_semantically_valid(query: str, result_name: str) -> bool:
+    """
+    Strict semantic validator that prevents generic category overlap (e.g., 'Facial')
+    from matching unrelated services unless there is genuine token/name continuity.
+    """
+    q_clean = query.strip().lower()
+    r_clean = result_name.strip().lower()
+
+    # Exact or complete phrase containment is always valid
+    if q_clean == r_clean or q_clean in r_clean:
+        return True
+
+    # Common generic salon terms that shouldn't validate a match on their own
+    generic_stop_words = {
+        "facial", "massage", "wax", "waxing", "hair", "spa",
+        "threading", "cleanup", "bleach", "pack", "mani", "pedi"
+    }
+
+    q_words = [w for w in q_clean.split() if len(w) > 1]
+    r_words = [w for w in r_clean.split() if len(w) > 1]
+
+    # Filter out pure generic words from the query tokens to find unique intent words
+    meaningful_q_words = [w for w in q_words if w not in generic_stop_words]
+
+    # If the query ONLY consisted of generic words (e.g. just "facial"), allow generic matching
+    if not meaningful_q_words:
+        return any(w in r_words for w in q_words)
+
+    # For queries with specific identifiers (like "Raunak" in "Raunak Facial"),
+    # at least one unique/meaningful query word MUST exist inside the result name.
+    match_found = False
+    for mqw in meaningful_q_words:
+        for rw in r_words:
+            # Check for strong prefix or exact match of the meaningful word
+            if rw == mqw or rw.startswith(mqw) or mqw.startswith(rw):
+                match_found = True
+                break
+        if match_found:
+            break
+
+    return match_found
 
 class FuzzySearchService:
     def __init__(self):
@@ -75,106 +116,114 @@ class FuzzySearchService:
             return {"status": "error", "message": str(e)}
 
     def fuzzy_search_services(
-        self,
-        query: str,
-        top_k: int = 5,
-        min_score: float = 0.8,
+            self,
+            query: str,
+            top_k: int = 5,
+            min_score: float = 0.8,
     ) -> list[dict[str, Any]]:
         """
-        Executes MongoDB Atlas Fuzzy Search on salonservices collection.
-        Uses $search with fuzzy option to find similar service names.
+        Executes MongoDB Atlas Fuzzy Search on salonservices collection with strict
+        exact/prefix matching for short queries (<=4 chars) and phrase-boosting for longer queries.
         """
         coll = self.get_salonservices_collection()
+        cleaned_query = query.strip()
+        query_len = len(cleaned_query)
 
-        # Build the fuzzy search pipeline
-        # Note: Need $addFields to capture searchScore before filtering in compound queries
+        if query_len <= 4:
+            # STRICT MODE for short queries: No fuzzy blocks to prevent drift
+            search_clauses = [
+                {
+                    "text": {
+                        "query": cleaned_query,
+                        "path": "salonServiceName",
+                        "score": {"boost": {"value": 5.0}}
+                    }
+                },
+                {
+                    "text": {
+                        "query": cleaned_query,
+                        "path": "serviceNameEnum"
+                    }
+                }
+            ]
+        else:
+            # FUZZY + PHRASE MODE for longer queries
+            search_clauses = [
+                {
+                    "phrase": {
+                        "query": cleaned_query,
+                        "path": "salonServiceName",
+                        "score": {"boost": {"value": 5.0}}
+                    }
+                },
+                {
+                    "text": {
+                        "query": cleaned_query,
+                        "path": "salonServiceName",
+                        "score": {"boost": {"value": 3.0}},
+                        "fuzzy": {
+                            "maxEdits": 2,
+                            "prefixLength": 2
+                        }
+                    }
+                },
+                {
+                    "text": {
+                        "query": cleaned_query,
+                        "path": "serviceNameEnum",
+                        "fuzzy": {
+                            "maxEdits": 2,
+                            "prefixLength": 2
+                        }
+                    }
+                }
+            ]
+
         pipeline = [
             {
                 "$search": {
                     "index": settings.salonservices_text_index,
                     "compound": {
-                        "should": [
-                            {
-                                "text": {
-                                    "query": query,
-                                    "path": "salonServiceName",
-                                    "fuzzy": {
-                                        "maxEdits": 2,
-                                        "prefixLength": 1,
-                                        "maxExpansions": 50
-                                    }
-                                }
-                            },
-                            {
-                                "text": {
-                                    "query": query,
-                                    "path": "serviceNameEnum",
-                                    "fuzzy": {
-                                        "maxEdits": 2,
-                                        "prefixLength": 1,
-                                        "maxExpansions": 50
-                                    }
-                                }
-                            }
-                        ]
+                        "should": search_clauses,
+                        "minimumShouldMatch": 1
                     }
                 }
             },
-            {
-                "$addFields": {"searchScore": {"$meta": "searchScore"}}
-            },
-            {
-                "$match": {
-                    "searchScore": {"$gte": min_score}
-                }
-            },
-            {
-                "$project": {
-                    "_id": 1,
-                    "salonServiceId": 1,
-                    "serviceId": 1,
-                    "salonServiceName": 1,
-                    "serviceNameEnum": 1,
-                    "forGender": 1,
-                    "score": "$searchScore"
-                }
-            },
-            {
-                "$limit": top_k
-            },
-            {
-                "$sort": {"score": -1}
-            }
+            {"$addFields": {"searchScore": {"$meta": "searchScore"}}},
+            {"$match": {"searchScore": {"$gte": min_score}}},
+            {"$project": {
+                "_id": 1,
+                "salonServiceId": 1,
+                "serviceId": 1,
+                "salonServiceName": 1,
+                "serviceNameEnum": 1,
+                "forGender": 1,
+                "score": "$searchScore"
+            }},
+            {"$sort": {"score": -1}},
+            {"$limit": top_k}
         ]
 
         try:
             results = list(coll.aggregate(pipeline))
-            if not results:
-                logger.info(f"Atlas Search returned no results for '{query}' (index may not exist), using regex fallback.")
-            else:
+            if results:
                 return results
         except Exception as e:
             logger.warning(f"Atlas Search failed for salonservices: {e}. Using regex fallback.")
-        
-        # Fallback: regex search (works without Atlas Search index, but slower)
+
+        # Fallback regex search
         fallback_pipeline = [
-            {
-                "$match": _build_regex_or_conditions(query, ["salonServiceName", "serviceNameEnum"])
-            },
-            {
-                "$project": {
-                    "_id": 1,
-                    "salonServiceId": 1,
-                    "serviceId": 1,
-                    "salonServiceName": 1,
-                    "serviceNameEnum": 1,
-                    "forGender": 1,
-                    "score": {"$literal": 1.0}
-                }
-            },
-            {
-                "$limit": top_k
-            }
+            {"$match": _build_regex_or_conditions(cleaned_query, ["salonServiceName", "serviceNameEnum"])},
+            {"$project": {
+                "_id": 1,
+                "salonServiceId": 1,
+                "serviceId": 1,
+                "salonServiceName": 1,
+                "serviceNameEnum": 1,
+                "forGender": 1,
+                "score": {"$literal": 1.0}
+            }},
+            {"$limit": top_k}
         ]
         try:
             return list(coll.aggregate(fallback_pipeline))
@@ -183,145 +232,161 @@ class FuzzySearchService:
             return []
 
     def fuzzy_search_variations(
-        self,
-        query: str,
-        top_k: int = 5,
-        min_score: float = 0.8,
+            self,
+            query: str,
+            top_k: int = 5,
+            min_score: float = 0.8,
     ) -> list[dict[str, Any]]:
         """
-        Executes MongoDB Atlas Fuzzy Search on salonservicevariations collection.
-        Uses $search with fuzzy option to find similar variation names.
+        Executes MongoDB Atlas Fuzzy Search on salonservicevariations collection with strict
+        exact/prefix matching for short queries (<=4 chars) and phrase-boosting for longer queries.
         """
         coll = self.get_salonservicevariations_collection()
+        cleaned_query = query.strip()
+        query_len = len(cleaned_query)
 
-        # Build the fuzzy search pipeline
-        # Note: Need $addFields to capture searchScore before filtering in compound queries
+        if query_len <= 4:
+            # STRICT MODE for short queries: No fuzzy blocks to prevent drift
+            search_clauses = [
+                {
+                    "text": {
+                        "query": cleaned_query,
+                        "path": "fullName",
+                        "score": {"boost": {"value": 5.0}}
+                    }
+                },
+                {
+                    "text": {
+                        "query": cleaned_query,
+                        "path": "salonServiceName"
+                    }
+                },
+                {
+                    "text": {
+                        "query": cleaned_query,
+                        "path": "comment"
+                    }
+                }
+            ]
+        else:
+            # FUZZY + PHRASE MODE for longer queries
+            search_clauses = [
+                {
+                    "phrase": {
+                        "query": cleaned_query,
+                        "path": "fullName",
+                        "score": {"boost": {"value": 5.0}}
+                    }
+                },
+                {
+                    "text": {
+                        "query": cleaned_query,
+                        "path": "fullName",
+                        "score": {"boost": {"value": 3.0}},
+                        "fuzzy": {
+                            "maxEdits": 2,
+                            "prefixLength": 2,
+                            "maxExpansions": 50
+                        }
+                    }
+                },
+                {
+                    "text": {
+                        "query": cleaned_query,
+                        "path": "salonServiceName",
+                        "fuzzy": {
+                            "maxEdits": 2,
+                            "prefixLength": 2,
+                            "maxExpansions": 50
+                        }
+                    }
+                },
+                {
+                    "text": {
+                        "query": cleaned_query,
+                        "path": "comment",
+                        "fuzzy": {
+                            "maxEdits": 2,
+                            "prefixLength": 2,
+                            "maxExpansions": 50
+                        }
+                    }
+                }
+            ]
+
         pipeline = [
             {
                 "$search": {
                     "index": settings.salonservicevariations_text_index,
                     "compound": {
-                        "should": [
-                            {
-                                "text": {
-                                    "query": query,
-                                    "path": "fullName",
-                                    "fuzzy": {
-                                        "maxEdits": 2,
-                                        "prefixLength": 1,
-                                        "maxExpansions": 50
-                                    }
-                                }
-                            },
-                            {
-                                "text": {
-                                    "query": query,
-                                    "path": "salonServiceName",
-                                    "fuzzy": {
-                                        "maxEdits": 2,
-                                        "prefixLength": 1,
-                                        "maxExpansions": 50
-                                    }
-                                }
-                            },
-                            {
-                                "text": {
-                                    "query": query,
-                                    "path": "comment",
-                                    "fuzzy": {
-                                        "maxEdits": 2,
-                                        "prefixLength": 1,
-                                        "maxExpansions": 50
-                                    }
-                                }
-                            }
-                        ]
+                        "should": search_clauses,
+                        "minimumShouldMatch": 1
                     }
                 }
             },
-            {
-                "$addFields": {"searchScore": {"$meta": "searchScore"}}
-            },
-            {
-                "$match": {
-                    "searchScore": {"$gte": min_score}
-                }
-            },
-            {
-                "$project": {
-                    "_id": 1,
-                    "salonServiceVariationId": 1,
-                    "fullName": 1,
-                    "price": 1,
-                    "duration": 1,
-                    "bufferInMins": 1,
-                    "pricingType": 1,
-                    "relativeIndex": 1,
-                    "isCombo": 1,
-                    "tagNameAndValues": 1,
-                    "forGender": 1,
-                    "personType": 1,
-                    "genericService": 1,
-                    "salonServiceId": 1,
-                    "serviceId": 1,
-                    "salonId": 1,
-                    "serviceNameEnum": 1,
-                    "salonServiceName": 1,
-                    "maxPrice": 1,
-                    "comment": 1,
-                    "score": "$searchScore"
-                }
-            },
-            {
-                "$limit": top_k
-            },
-            {
-                "$sort": {"score": -1}
-            }
+            {"$addFields": {"searchScore": {"$meta": "searchScore"}}},
+            {"$match": {"searchScore": {"$gte": min_score}}},
+            {"$project": {
+                "_id": 1,
+                "salonServiceVariationId": 1,
+                "fullName": 1,
+                "price": 1,
+                "duration": 1,
+                "bufferInMins": 1,
+                "pricingType": 1,
+                "relativeIndex": 1,
+                "isCombo": 1,
+                "tagNameAndValues": 1,
+                "forGender": 1,
+                "personType": 1,
+                "genericService": 1,
+                "salonServiceId": 1,
+                "serviceId": 1,
+                "salonId": 1,
+                "serviceNameEnum": 1,
+                "salonServiceName": 1,
+                "maxPrice": 1,
+                "comment": 1,
+                "score": "$searchScore"
+            }},
+            {"$sort": {"score": -1}},
+            {"$limit": top_k}
         ]
 
         try:
             results = list(coll.aggregate(pipeline))
-            if not results:
-                logger.info(f"Atlas Search returned no results for '{query}' (index may not exist), using regex fallback.")
-            else:
+            if results:
                 return results
         except Exception as e:
             logger.warning(f"Atlas Search failed for salonservicevariations: {e}. Using regex fallback.")
-        
-        # Fallback: regex search (works without Atlas Search index, but slower)
+
+        # Fallback regex search
         fallback_pipeline = [
-            {
-                "$match": _build_regex_or_conditions(query, ["fullName", "salonServiceName", "comment"])
-            },
-            {
-                "$project": {
-                    "_id": 1,
-                    "salonServiceVariationId": 1,
-                    "fullName": 1,
-                    "price": 1,
-                    "duration": 1,
-                    "bufferInMins": 1,
-                    "pricingType": 1,
-                    "relativeIndex": 1,
-                    "isCombo": 1,
-                    "tagNameAndValues": 1,
-                    "forGender": 1,
-                    "personType": 1,
-                    "genericService": 1,
-                    "salonServiceId": 1,
-                    "serviceId": 1,
-                    "salonId": 1,
-                    "serviceNameEnum": 1,
-                    "salonServiceName": 1,
-                    "maxPrice": 1,
-                    "comment": 1,
-                    "score": {"$literal": 1.0}
-                }
-            },
-            {
-                "$limit": top_k
-            }
+            {"$match": _build_regex_or_conditions(cleaned_query, ["fullName", "salonServiceName", "comment"])},
+            {"$project": {
+                "_id": 1,
+                "salonServiceVariationId": 1,
+                "fullName": 1,
+                "price": 1,
+                "duration": 1,
+                "bufferInMins": 1,
+                "pricingType": 1,
+                "relativeIndex": 1,
+                "isCombo": 1,
+                "tagNameAndValues": 1,
+                "forGender": 1,
+                "personType": 1,
+                "genericService": 1,
+                "salonServiceId": 1,
+                "serviceId": 1,
+                "salonId": 1,
+                "serviceNameEnum": 1,
+                "salonServiceName": 1,
+                "maxPrice": 1,
+                "comment": 1,
+                "score": {"$literal": 1.0}
+            }},
+            {"$limit": top_k}
         ]
         try:
             return list(coll.aggregate(fallback_pipeline))
@@ -393,24 +458,25 @@ class FuzzySearchService:
         return recommendations
 
     def recommend_variations(
-        self,
-        query: str,
-        top_k: int = 5,
-        min_confidence: int = 80,
+            self,
+            query: str,
+            top_k: int = 5,
+            min_confidence: int = 80,
     ) -> list[VariationRecommendation]:
         """
         Returns typed VariationRecommendation models for variations with confidence percentage.
-        Deduplicates by variationId (salonServiceVariationId) and by variationName (fullName).
-        Normalizes Atlas Search scores to 0-1 range.
+        Deduplicates by variationId and variationName, and filters out semantic drift.
         """
         raw_results = self.fuzzy_search_variations(
             query=query,
-            top_k=top_k * 3,  # Fetch more to allow for deduplication
-            min_score=min_confidence / 100.0
+            top_k=top_k * 3,  # Fetch more to allow for filtering & deduplication
+            min_score=0.0  # Fetch all candidates to let normalization & firewall handle gating
         )
-        
+
+        if not raw_results:
+            return []
+
         # Normalize scores: Atlas Search BM25 scores can exceed 1.0
-        # Use max score in result set as 1.0 (100%) reference
         max_score = max((r.get("score", 0.0) for r in raw_results), default=1.0)
         if max_score == 0:
             max_score = 1.0
@@ -423,10 +489,14 @@ class FuzzySearchService:
             variation_id = str(res.get("salonServiceVariationId", ""))
             variation_name = res.get("fullName", "").strip()
 
-            # Skip if already seen this variation ID
+            # 1. Semantic Firewall: Drop false-positive fuzzy drifts
+            if not _is_semantically_valid(query, variation_name):
+                continue
+
+            # 2. Skip if already seen this variation ID
             if variation_id in seen_variation_ids:
                 continue
-            # Skip if already seen this variation name (case-insensitive)
+            # 3. Skip if already seen this variation name (case-insensitive)
             if variation_name.lower() in seen_variation_names:
                 continue
 
@@ -454,3 +524,67 @@ class FuzzySearchService:
                 break
 
         return recommendations
+
+
+    # def recommend_variations(
+    #     self,
+    #     query: str,
+    #     top_k: int = 5,
+    #     min_confidence: int = 80,
+    # ) -> list[VariationRecommendation]:
+    #     """
+    #     Returns typed VariationRecommendation models for variations with confidence percentage.
+    #     Deduplicates by variationId (salonServiceVariationId) and by variationName (fullName).
+    #     Normalizes Atlas Search scores to 0-1 range.
+    #     """
+    #     raw_results = self.fuzzy_search_variations(
+    #         query=query,
+    #         top_k=top_k * 3,  # Fetch more to allow for deduplication
+    #         min_score=min_confidence / 100.0
+    #     )
+    #
+    #     # Normalize scores: Atlas Search BM25 scores can exceed 1.0
+    #     # Use max score in result set as 1.0 (100%) reference
+    #     max_score = max((r.get("score", 0.0) for r in raw_results), default=1.0)
+    #     if max_score == 0:
+    #         max_score = 1.0
+    #
+    #     recommendations = []
+    #     seen_variation_ids = set()
+    #     seen_variation_names = set()
+    #
+    #     for res in raw_results:
+    #         variation_id = str(res.get("salonServiceVariationId", ""))
+    #         variation_name = res.get("fullName", "").strip()
+    #
+    #         # Skip if already seen this variation ID
+    #         if variation_id in seen_variation_ids:
+    #             continue
+    #         # Skip if already seen this variation name (case-insensitive)
+    #         if variation_name.lower() in seen_variation_names:
+    #             continue
+    #
+    #         seen_variation_ids.add(variation_id)
+    #         seen_variation_names.add(variation_name.lower())
+    #
+    #         raw_score = res.get("score", 0.0)
+    #         # Normalize to 0-1 range
+    #         normalized_score = min(raw_score / max_score, 1.0)
+    #         similarity_pct = int(round(normalized_score * 100))
+    #
+    #         # Only include if meets minimum confidence threshold
+    #         if similarity_pct >= min_confidence:
+    #             recommendations.append(
+    #                 VariationRecommendation(
+    #                     serviceId=str(res.get("serviceId", "")),
+    #                     variationId=variation_id,
+    #                     variationName=variation_name or "Unknown Variation",
+    #                     score=normalized_score,
+    #                     similarity_percentage=similarity_pct
+    #                 )
+    #             )
+    #
+    #         if len(recommendations) >= top_k:
+    #             break
+    #
+    #     return recommendations

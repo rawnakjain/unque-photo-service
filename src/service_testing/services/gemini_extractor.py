@@ -271,7 +271,9 @@ PACKAGE ASSOCIATION RULES:
     the base service field when they can be separated confidently.
 
 14. The "price" and "price_raw" fields must correspond to the exact
-    service-package combination represented by the item.
+    service-tier combination represented by the item.
+    Use it only for services with tiers, not for all the services.
+    Tier services has generally more than one price depending upon the Tier
 
 15. If a menu provides a general service price and additional
     package-specific prices, preserve the general offering only when
