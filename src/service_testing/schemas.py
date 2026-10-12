@@ -163,3 +163,31 @@ class CatalogConfirmationResponse(BaseModel):
     total_confirmed: int
     message: str
     confirmed_items: list[ConfirmedItemPayload]
+
+
+class VariationRecommendationItem(BaseModel):
+    """Single variation recommendation with index."""
+    index: int
+    name: str
+    score: Optional[float] = None
+
+
+class RecommendedVariation(BaseModel):
+    """Recommended variation with service info and nested variation recommendations."""
+    variationName: str
+    serviceName: str
+    serviceId: str
+    price: Optional[float] = None
+    priceType: PriceTypeEnum = PriceTypeEnum.fixed
+    variationRecommendations: list[VariationRecommendationItem] = Field(default_factory=list)
+
+
+class MediaServiceItem(BaseModel):
+    """Container for recommended variations per extracted item."""
+    recommendedVariations: list[RecommendedVariation] = Field(default_factory=list)
+
+
+class MediaServiceResponse(BaseModel):
+    """Response for media service image-to-text endpoint."""
+    data: list[MediaServiceItem] = Field(default_factory=list)
+    errors: dict = Field(default_factory=dict)
