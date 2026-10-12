@@ -35,7 +35,10 @@
             faint: '#a1a1a1',
             hairline: '#ebebeb',
             'hairline-soft': '#f2f2f2',
-            link: '#0070f3'
+            link: '#0070f3',
+            blue: '#3b82f6',
+            amber: '#f59e0b',
+            emerald: '#10b981'
           },
           letterSpacing: {
             tighter: '-2.4px',
@@ -179,9 +182,10 @@
           <thead class="bg-canvas border-b border-hairline">
             <tr>
               <th class="px-4 py-3 font-mono text-[12px] font-medium text-body uppercase whitespace-nowrap">Extracted Service</th>
+              <th class="px-4 py-3 font-mono text-[12px] font-medium text-body uppercase whitespace-nowrap">Canonical Service</th>
+              <th class="px-4 py-3 font-mono text-[12px] font-medium text-body uppercase whitespace-nowrap">Recommended Service</th>
               <th class="px-4 py-3 font-mono text-[12px] font-medium text-body uppercase whitespace-nowrap">Price/Dur</th>
               <th class="px-4 py-3 font-mono text-[12px] font-medium text-body uppercase whitespace-nowrap">Demographic</th>
-              <th class="px-4 py-3 font-mono text-[12px] font-medium text-body uppercase whitespace-nowrap">Matched Service (salonservices)</th>
               <th class="px-4 py-3 font-mono text-[12px] font-medium text-body uppercase whitespace-nowrap">Matched Variation (salonservicevariations)</th>
             </tr>
           </thead>
@@ -194,13 +198,43 @@
                 <td class="px-4 py-3 align-top">
                   <div class="flex flex-col space-y-1">
                     <span class="font-mono text-[10px] uppercase px-2 py-0.5 rounded-full bg-canvas border border-hairline text-mute w-max" x-text="item.extracted.service"></span>
-                    <input type="text" x-model="item.extracted.service_variation" class="font-sans font-medium text-[14px] text-ink bg-transparent border-b border-transparent focus:border-hairline focus:outline-none w-[220px]" />
+                    <input type="text" x-model="item.extracted.variation_name" class="font-sans font-medium text-[14px] text-ink bg-transparent border-b border-transparent focus:border-hairline focus:outline-none w-[220px]" />
+                  </div>
+                </td>
+
+                <!-- Canonical Service -->
+                <td class="px-4 py-3 align-top">
+                  <div class="flex flex-col space-y-1">
+                    <template x-if="item.extracted.canonical_service_name">
+                      <span class="font-sans font-medium text-[14px] text-ink" x-text="item.extracted.canonical_service_name"></span>
+                      <span class="font-mono text-[10px] text-emerald px-2 py-0.5 rounded-full bg-emerald/10 border border-emerald/20 w-max">From Whitelist</span>
+                    </template>
+                    <template x-if="!item.extracted.canonical_service_name">
+                      <span class="font-sans text-[14px] text-mute">—</span>
+                      <span class="font-mono text-[10px] text-mute px-2 py-0.5 rounded-full bg-canvas border border-hairline w-max">Unmapped</span>
+                    </template>
+                  </div>
+                </td>
+
+                <!-- Recommended Service -->
+                <td class="px-4 py-3 align-top">
+                  <div class="flex flex-col space-y-1">
+                    <template x-if="item.extracted.recommended_new_service_name">
+                      <span class="font-sans font-medium text-[14px] text-ink" x-text="item.extracted.recommended_new_service_name"></span>
+                      <span class="font-mono text-[10px] text-blue px-2 py-0.5 rounded-full bg-blue/10 border border-blue/20 w-max">AI Recommended</span>
+                    </template>
+                    <template x-if="!item.extracted.recommended_new_service_name">
+                      <span class="font-sans text-[14px] text-mute">—</span>
+                    </template>
                   </div>
                 </td>
 
                 <!-- Price / Dur -->
                 <td class="px-4 py-3 align-top whitespace-nowrap">
                   <div class="flex flex-col">
+                    <template x-if="item.extracted.price_type === 'starts_from' || item.extracted.price_type === 'starting_from' || item.extracted.price_type === 'from'">
+                      <span class="font-mono text-[10px] text-amber px-1.5 py-0.5 rounded bg-amber/10 border border-amber/20 w-max mb-1">Starts from</span>
+                    </template>
                     <span class="font-sans text-[14px] text-ink" x-text="item.extracted.price_raw || item.extracted.price || '-'"></span>
                     <span class="font-sans text-[12px] text-mute" x-text="item.extracted.approx_duration || '-'"></span>
                   </div>
@@ -211,30 +245,6 @@
                   <div class="flex gap-2">
                     <span class="inline-flex items-center justify-center font-sans text-[12px] font-medium h-5 px-1.5 rounded-[4px] border border-hairline text-ink bg-canvas" x-text="item.extracted.gender"></span>
                     <span class="inline-flex items-center justify-center font-sans text-[12px] font-medium h-5 px-1.5 rounded-[4px] border border-hairline text-ink bg-canvas" x-text="item.extracted.person_type"></span>
-                  </div>
-                </td>
-
-                <!-- Matched Service (salonservices) -->
-                <td class="px-4 py-3 align-top">
-                  <div class="flex flex-col relative w-[300px]">
-                    <!-- Service Recommendations Column -->
-                    <div class="space-y-2">
-                      <div class="font-mono text-[12px] font-medium text-body uppercase mb-2">Matched Services</div>
-                      <template x-if="item.service_recommendations.filter(rec => rec.similarity_percentage >= 80).length > 0">
-                        <select x-model="item.selected_service_id" @change="item.selected_service_name = item.service_recommendations.find(r=> r.serviceId === item.selected_service_id)?.variationName || ''" class="w-full border border-hairline rounded-[6px] bg-white p-2 text-[14px] text-ink focus:outline-none focus:border-link focus:ring-2 focus:ring-[#0070f3]/20">
-                          <option value="" disabled>Select a service...</option>
-                          <template x-for="(rec, index) in item.service_recommendations.filter(rec => rec.similarity_percentage >= 80)" :key="rec.serviceId">
-                            <option :value="rec.serviceId">
-                              <span x-text="'[' + rec.similarity_percentage + '%] ' + rec.variationName"></span>
-                              <span class="font-mono text-[10px] text-mute" x-text="rec.score"></span>
-                            </option>
-                          </template>
-                        </select>
-                      </template>
-                      <template x-if="item.service_recommendations.filter(rec => rec.similarity_percentage >= 80).length === 0">
-                        <div class="text-[11px] text-mute p-2 text-center">No high match services (>=80%)</div>
-                      </template>
-                    </div>
                   </div>
                 </td>
 
@@ -336,10 +346,10 @@
 
             // Set default selections
             data.items.forEach(item => {
-              if(!item.selected_service_id && item.service_recommendations.length > 0) {
-                 item.selected_service_id = item.service_recommendations[0].serviceId;
-                 item.selected_service_name = item.service_recommendations[0].variationName;
-              }
+if(!item.selected_service_id && item.service_recommendations.length > 0) {
+                  item.selected_service_id = item.service_recommendations[0].serviceId;
+                  item.selected_service_name = item.service_recommendations[0].serviceName;
+               }
               if(!item.selected_variation_id && item.variation_recommendations.length > 0) {
                  item.selected_variation_id = item.variation_recommendations[0].variationId;
                  item.selected_variation_name = item.variation_recommendations[0].variationName;
@@ -357,23 +367,23 @@
 
         // Selection functions are now handled inline in the template via @click
 
-        async confirmCatalog() {
+async confirmCatalog() {
            const payload = {
-             salon_name: "Demo Salon",
-             items: this.results.items.map(i => ({
-                service: i.extracted.service,
-                extracted_variation: i.extracted.service_variation,
-                price: i.extracted.price,
-                price_raw: i.extracted.price_raw,
-                duration: i.extracted.approx_duration,
-                gender: i.extracted.gender,
-                person_type: i.extracted.person_type,
-                matched_service_id: i.selected_service_id || null,
-                matched_service_name: i.selected_service_name || '',
-                matched_variation_id: i.selected_variation_id || null,
-                matched_variation_name: i.selected_variation_name || ''
-             }))
-           };
+              salon_name: "Demo Salon",
+              items: this.results.items.map(i => ({
+                 service: i.selected_service_name || i.extracted.service,
+                 extracted_variation: i.extracted.variation_name,
+                 price: i.extracted.price,
+                 price_raw: i.extracted.price_raw,
+                 duration: i.extracted.approx_duration,
+                 gender: i.extracted.gender,
+                 person_type: i.extracted.person_type,
+                 matched_service_id: i.selected_service_id || null,
+                 matched_service_name: i.selected_service_name || '',
+                 matched_variation_id: i.selected_variation_id || null,
+                 matched_variation_name: i.selected_variation_name || ''
+              }))
+            };
 
            try {
              const resp = await fetch('/api/menu/confirm', {

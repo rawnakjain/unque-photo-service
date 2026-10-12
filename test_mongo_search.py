@@ -15,13 +15,13 @@ def test_fuzzy_search():
     service_results = fuzzy.recommend_services(query="haircut", top_k=5, min_confidence=80)
     print(f"Found {len(service_results)} service recommendations for 'haircut'")
     for i, r in enumerate(service_results):
-        print(f"  {i+1}. {r.variationName} (similarity: {r.similarity_percentage}%)")
+        print(f"  {i+1}. {r.serviceName} (serviceId: {r.serviceId}, similarity: {r.similarity_percentage}%)")
 
     # Test another service query
     service_results2 = fuzzy.recommend_services(query="facial", top_k=5, min_confidence=80)
     print(f"Found {len(service_results2)} service recommendations for 'facial'")
     for i, r in enumerate(service_results2):
-        print(f"  {i+1}. {r.variationName} (similarity: {r.similarity_percentage}%)")
+        print(f"  {i+1}. {r.serviceName} (serviceId: {r.serviceId}, similarity: {r.similarity_percentage}%)")
 
     # Test variation search on salonservicevariations collection
     print("\n--- Testing Variation Search (salonservicevariations) ---")

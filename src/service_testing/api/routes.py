@@ -1,11 +1,10 @@
-"""FastAPI API routes for salon menu extraction and fuzzy search."""
+"""FastAPI API routes for salon menu extraction and fuzzy search (variations only)."""
 
 import logging
 from typing import Optional
 from fastapi import APIRouter, File, HTTPException, UploadFile, status
 
 from service_testing.config import settings
-from service_testing.constants import UNIQUE_STANDARD_SERVICES
 from service_testing.schemas import (
     CatalogConfirmationRequest,
     CatalogConfirmationResponse,
@@ -45,21 +44,17 @@ def health_check():
     fuzzy = get_fuzzy_service()
     fuzzy_status = fuzzy.check_connection()
 
+    # Vertex AI is configured via gcp_project_id and gcp_location
+    gemini_configured = bool(settings.gcp_project_id and settings.gcp_location)
+
     return {
         "status": "healthy" if fuzzy_status.get("status") == "connected" else "degraded",
         "gemini": {
-            "configured": bool(settings.gemini_api_key),
+            "configured": gemini_configured,
             "model": settings.gemini_model,
         },
         "mongodb": fuzzy_status,
-        "standard_services_count": len(UNIQUE_STANDARD_SERVICES),
     }
-
-
-@router.get("/services")
-def get_standard_services() -> list[str]:
-    """Returns the predefined ~100 standard salon service categories."""
-    return UNIQUE_STANDARD_SERVICES
 
 
 @router.post("/variations/search", response_model=list[VariationRecommendation])
@@ -67,31 +62,19 @@ def search_variations(payload: VariationSearchRequest):
     """
     Search variations directly in MongoDB Atlas using fuzzy search.
     Returns top-k recommendations with confidence >= 80%.
+    Optionally filters by service_id.
     """
     try:
         fuzzy = get_fuzzy_service()
-        results = fuzzy.recommend_variations(query=payload.query, top_k=payload.top_k, min_confidence=80)
+        results = fuzzy.recommend_variations(
+            query=payload.query, 
+            top_k=payload.top_k, 
+            min_confidence=80,
+            service_id=payload.service_id,
+        )
         return results
     except Exception as e:
         logger.error(f"Error executing variation search: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Fuzzy search failed: {str(e)}",
-        )
-
-
-@router.post("/services/search", response_model=list[VariationRecommendation])
-def search_services(payload: VariationSearchRequest):
-    """
-    Search services directly in MongoDB Atlas using fuzzy search on salonservices collection.
-    Returns top-k recommendations with confidence >= 80%.
-    """
-    try:
-        fuzzy = get_fuzzy_service()
-        results = fuzzy.recommend_services(query=payload.query, top_k=payload.top_k, min_confidence=80)
-        return results
-    except Exception as e:
-        logger.error(f"Error executing service search: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Fuzzy search failed: {str(e)}",
@@ -104,10 +87,10 @@ async def extract_and_match_menu(
 ):
     """
     Upload a menu image/catalogue.
-    1. Extracts services & variations with Gemini Flash.
-    2. Performs Atlas Fuzzy Search on salonservices (for service) and salonservicevariations (for variation).
+    1. Extracts services & variations with Gemini Flash (services mapped to whitelist).
+    2. Performs Atlas Fuzzy Search on salonservicevariations for variations only.
     3. Applies 80% confidence threshold.
-    4. Returns structured items with top-5 recommended database matches.
+    4. Returns structured items with canonical_service_name and variation recommendations.
     """
     if not file.content_type or not (
         file.content_type.startswith("image/") or file.filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))

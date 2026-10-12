@@ -36,7 +36,7 @@ This application automates salon price menu onboarding by:
 #### 5.1 Gemini Extraction
 | File | Purpose |
 |------|---------|
-| `src/service_testing/services/gemini_extractor.py` | `GeminiExtractorService`<br>- Sends menu image to Gemini 2.5 Flash with structured prompt<br>- Returns `GeminiExtractionResponse` with list of `ExtractedMenuItem`<br>- Each item has: `service` (category), `service_variation` (full name), `price`, `gender`, `person_type` |
+| `src/service_testing/services/gemini_extractor.py` | `GeminiExtractorService`<br>- Sends menu image to Gemini 2.5 Flash with structured prompt<br>- Returns `GeminiExtractionResponse` with list of `ExtractedMenuItem`<br>- Each item has: `service` (category), `variation_name` (full name), `price`, `gender`, `person_type` |
 
 #### 5.2 MongoDB Atlas Fuzzy Search
 | File | Purpose |
@@ -46,7 +46,7 @@ This application automates salon price menu onboarding by:
 #### 5.3 Menu Processor (Orchestrator)
 | File | Purpose |
 |------|---------|
-| `src/service_testing/services/menu_processor.py` | `MenuProcessorService`<br>**Orchestrates full pipeline:**<br>1. Call Gemini to extract items from image<br>2. For each extracted item:<br>   a. Search **services** in `salonservices` using `item.service`<br>   b. Search **variations** in `salonservicevariations` using `item.service_variation`<br>3. Apply 80% confidence threshold to both<br>4. Return `ProcessedMenuItem` with separate `service_recommendations` and `variation_recommendations` lists |
+| `src/service_testing/services/menu_processor.py` | `MenuProcessorService`<br>**Orchestrates full pipeline:**<br>1. Call Gemini to extract items from image<br>2. For each extracted item:<br>   a. Search **services** in `salonservices` using `item.service`<br>   b. Search **variations** in `salonservicevariations` using `item.variation_name`<br>3. Apply 80% confidence threshold to both<br>4. Return `ProcessedMenuItem` with separate `service_recommendations` and `variation_recommendations` lists |
 
 ### 6. API Routes
 | File | Purpose |
@@ -92,7 +92,7 @@ For each ExtractedMenuItem:
         │   Returns: List[VariationRecommendation] 
         │   (serviceId, variationName, similarity_percentage)
         │
-        └──► FuzzySearchService.recommend_variations(item.service_variation)
+        └──► FuzzySearchService.recommend_variations(item.variation_name)
                 │
                 ▼
             Atlas Search on salonservicevariations

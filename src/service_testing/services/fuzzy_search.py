@@ -2,12 +2,12 @@
 
 import logging
 import re
-from typing import Any, List
+from typing import Any, List, Optional
 import pymongo
 from pymongo.collection import Collection
 
 from service_testing.config import settings
-from service_testing.schemas import VariationRecommendation
+from service_testing.schemas import ServiceRecommendation, VariationRecommendation
 
 logger = logging.getLogger(__name__)
 
@@ -236,10 +236,12 @@ class FuzzySearchService:
             query: str,
             top_k: int = 5,
             min_score: float = 0.8,
+            service_id: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         """
         Executes MongoDB Atlas Fuzzy Search on salonservicevariations collection with strict
         exact/prefix matching for short queries (<=4 chars) and phrase-boosting for longer queries.
+        Optionally filters by service_id to restrict variations to a specific service.
         """
         coll = self.get_salonservicevariations_collection()
         cleaned_query = query.strip()
@@ -314,55 +316,84 @@ class FuzzySearchService:
                 }
             ]
 
-        pipeline = [
-            {
-                "$search": {
-                    "index": settings.salonservicevariations_text_index,
-                    "compound": {
-                        "should": search_clauses,
-                        "minimumShouldMatch": 1
-                    }
-                }
-            },
-            {"$addFields": {"searchScore": {"$meta": "searchScore"}}},
-            {"$match": {"searchScore": {"$gte": min_score}}},
-            {"$project": {
-                "_id": 1,
-                "salonServiceVariationId": 1,
-                "fullName": 1,
-                "price": 1,
-                "duration": 1,
-                "bufferInMins": 1,
-                "pricingType": 1,
-                "relativeIndex": 1,
-                "isCombo": 1,
-                "tagNameAndValues": 1,
-                "forGender": 1,
-                "personType": 1,
-                "genericService": 1,
-                "salonServiceId": 1,
-                "serviceId": 1,
-                "salonId": 1,
-                "serviceNameEnum": 1,
-                "salonServiceName": 1,
-                "maxPrice": 1,
-                "comment": 1,
-                "score": "$searchScore"
-            }},
-            {"$sort": {"score": -1}},
-            {"$limit": top_k}
-        ]
+        # Add service_id filter if provided
+        filter_clauses = []
+        if service_id:
+            filter_clauses.append({"equals": {"path": "serviceId", "value": service_id}})
 
-        try:
-            results = list(coll.aggregate(pipeline))
-            if results:
-                return results
-        except Exception as e:
-            logger.warning(f"Atlas Search failed for salonservicevariations: {e}. Using regex fallback.")
+        compound_query = {
+            "should": search_clauses,
+            "minimumShouldMatch": 1
+        }
+        if filter_clauses:
+            compound_query["filter"] = filter_clauses
 
-        # Fallback regex search
+        # Try Atlas Search with filter first; if it fails (e.g., field not indexed), 
+        # fall back to search without filter and filter in Python
+        def _run_atlas_search(use_filter: bool) -> list[dict[str, Any]]:
+            query = compound_query if use_filter else {"should": search_clauses, "minimumShouldMatch": 1}
+            pipeline = [
+                {"$search": {"index": settings.salonservicevariations_text_index, "compound": query}},
+                {"$addFields": {"searchScore": {"$meta": "searchScore"}}},
+                {"$match": {"searchScore": {"$gte": min_score}}},
+                {"$project": {
+                    "_id": 1,
+                    "salonServiceVariationId": 1,
+                    "fullName": 1,
+                    "price": 1,
+                    "duration": 1,
+                    "bufferInMins": 1,
+                    "pricingType": 1,
+                    "relativeIndex": 1,
+                    "isCombo": 1,
+                    "tagNameAndValues": 1,
+                    "forGender": 1,
+                    "personType": 1,
+                    "genericService": 1,
+                    "salonServiceId": 1,
+                    "serviceId": 1,
+                    "salonId": 1,
+                    "serviceNameEnum": 1,
+                    "salonServiceName": 1,
+                    "maxPrice": 1,
+                    "comment": 1,
+                    "score": "$searchScore"
+                }},
+                {"$sort": {"score": -1}},
+                {"$limit": top_k * 3}  # Fetch more to allow post-filtering
+            ]
+            return list(coll.aggregate(pipeline))
+
+        results = []
+        if service_id:
+            # Try with filter first
+            try:
+                results = _run_atlas_search(use_filter=True)
+            except Exception as e:
+                logger.warning(f"Atlas Search with service_id filter failed: {e}. Retrying without filter.")
+                # Fall back to search without filter, then filter in Python
+                try:
+                    all_results = _run_atlas_search(use_filter=False)
+                    results = [r for r in all_results if str(r.get("serviceId", "")) == service_id]
+                except Exception as e2:
+                    logger.warning(f"Atlas Search without filter also failed: {e2}. Using regex fallback.")
+        else:
+            # No service_id filter, normal search
+            try:
+                results = _run_atlas_search(use_filter=False)
+            except Exception as e:
+                logger.warning(f"Atlas Search failed: {e}. Using regex fallback.")
+
+        if results:
+            return results
+
+        # Regex fallback (with optional service_id filter)
+        fallback_match = _build_regex_or_conditions(cleaned_query, ["fullName", "salonServiceName", "comment"])
+        if service_id:
+            fallback_match = {"$and": [fallback_match, {"serviceId": service_id}]}
+        
         fallback_pipeline = [
-            {"$match": _build_regex_or_conditions(cleaned_query, ["fullName", "salonServiceName", "comment"])},
+            {"$match": fallback_match},
             {"$project": {
                 "_id": 1,
                 "salonServiceVariationId": 1,
@@ -403,7 +434,7 @@ class FuzzySearchService:
         """
         Returns typed VariationRecommendation models for services with confidence percentage.
         Deduplicates by serviceId and by serviceName (salonServiceName).
-        Normalizes Atlas Search scores to 0-1 range.
+        Normalizes Atlas Search scores by max score in result set.
         """
         raw_results = self.fuzzy_search_services(
             query=query,
@@ -411,8 +442,8 @@ class FuzzySearchService:
             min_score=min_confidence / 100.0
         )
         
-        # Normalize scores: Atlas Search BM25 scores can exceed 1.0
-        # Use max score in result set as 1.0 (100%) reference
+        # Normalize scores by max score in result set to get relative percentages
+        # Atlas Search BM25 scores can exceed 1.0; normalization preserves relative ranking
         max_score = max((r.get("score", 0.0) for r in raw_results), default=1.0)
         if max_score == 0:
             max_score = 1.0
@@ -436,17 +467,16 @@ class FuzzySearchService:
             seen_service_names.add(service_name.lower())
 
             raw_score = res.get("score", 0.0)
-            # Normalize to 0-1 range
+            # Normalize to 0-1 range by max score in result set
             normalized_score = min(raw_score / max_score, 1.0)
             similarity_pct = int(round(normalized_score * 100))
 
             # Only include if meets minimum confidence threshold
             if similarity_pct >= min_confidence:
                 recommendations.append(
-                    VariationRecommendation(
+                    ServiceRecommendation(
                         serviceId=service_id,
-                        variationId="",  # Not applicable for service-level match
-                        variationName=service_name or "Unknown Service",
+                        serviceName=service_name or "Unknown Service",
                         score=normalized_score,
                         similarity_percentage=similarity_pct
                     )
@@ -462,21 +492,25 @@ class FuzzySearchService:
             query: str,
             top_k: int = 5,
             min_confidence: int = 80,
+            service_id: Optional[str] = None,
     ) -> list[VariationRecommendation]:
         """
         Returns typed VariationRecommendation models for variations with confidence percentage.
         Deduplicates by variationId and variationName, and filters out semantic drift.
+        Optionally filters by service_id to restrict variations to a specific service.
         """
         raw_results = self.fuzzy_search_variations(
             query=query,
             top_k=top_k * 3,  # Fetch more to allow for filtering & deduplication
-            min_score=0.0  # Fetch all candidates to let normalization & firewall handle gating
+            min_score=min_confidence / 100.0,  # Filter by Atlas Search score threshold
+            service_id=service_id,
         )
 
         if not raw_results:
             return []
 
-        # Normalize scores: Atlas Search BM25 scores can exceed 1.0
+        # Normalize scores by max score in result set to get relative percentages
+        # Atlas Search BM25 scores can exceed 1.0; normalization preserves relative ranking
         max_score = max((r.get("score", 0.0) for r in raw_results), default=1.0)
         if max_score == 0:
             max_score = 1.0
@@ -504,7 +538,7 @@ class FuzzySearchService:
             seen_variation_names.add(variation_name.lower())
 
             raw_score = res.get("score", 0.0)
-            # Normalize to 0-1 range
+            # Normalize to 0-1 range by max score in result set
             normalized_score = min(raw_score / max_score, 1.0)
             similarity_pct = int(round(normalized_score * 100))
 
@@ -512,7 +546,6 @@ class FuzzySearchService:
             if similarity_pct >= min_confidence:
                 recommendations.append(
                     VariationRecommendation(
-                        serviceId=str(res.get("serviceId", "")),
                         variationId=variation_id,
                         variationName=variation_name or "Unknown Variation",
                         score=normalized_score,

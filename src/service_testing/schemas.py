@@ -14,38 +14,54 @@ class GenderEnum(str, Enum):
 class PersonTypeEnum(str, Enum):
     Adult = "Adult"
     Child = "Child"
-    Any = "Any"
+
+
+class PriceTypeEnum(str, Enum):
+    fixed = "fixed"
+    starting = "starting"
 
 
 class ExtractedMenuItem(BaseModel):
     """Raw structured item extracted from salon price menu / catalogue."""
     service: str = Field(
         ...,
-        description="Standard service category matched to predefined list (e.g., haircut, facial, waxing, etc.)",
+        description="The broad, base service category extracted from the menu (e.g., 'Waxing', 'Facial', 'Haircut')",
     )
-    service_variation: str = Field(
+    variation_name: str = Field(
         ...,
-        description="Specific service variation as printed on the menu (e.g., 'Signature Haircut - BOB by Senior Stylist', 'Full Arm Wax')",
+        description="The specific purchasable item including meaningful modifiers like packages, brands, body areas, hair lengths, or techniques (e.g., 'Full Leg Wax', 'Root Touchup - Inoa')",
+    )
+    canonical_service_name: Optional[str] = Field(
+        None,
+        description="Map the extracted service to the most appropriate match from the allowed whitelist, or null if it does not fit",
+    )
+    recommended_new_service_name: Optional[str] = Field(
+        None,
+        description="If a service does NOT fit neatly into any whitelisted category, provide a clean, standardized candidate string here. Otherwise, null",
     )
     price: Optional[float] = Field(
         None,
-        description="Price in numeric format if available",
+        description="Clean numeric value (integer/float) without currency symbols, or null if unreadable. For price ranges, use the lower bound.",
     )
     price_raw: Optional[str] = Field(
         None,
-        description="Original price string from menu if present (e.g., '₹850', '$45')",
+        description="Exact price string as it appears in the image (e.g., '₹500', 'Starting @ 500')",
+    )
+    price_type: PriceTypeEnum = Field(
+        default=PriceTypeEnum.fixed,
+        description="Must be 'fixed' or 'starting'. Use 'starting' if prefixed with terms like 'Starts from', 'Onwards', 'From', or if it represents a price range/base tier. Otherwise, use 'fixed'",
     )
     approx_duration: Optional[str] = Field(
         None,
-        description="Approximate duration (e.g., '45 mins', '1 hr')",
+        description="Printed duration (e.g., '45 mins') or null",
     )
     gender: GenderEnum = Field(
         default=GenderEnum.U,
-        description="Target gender: M (Male), F (Female), U (Unisex)",
+        description="Exactly one of 'M', 'F', or 'U' (unisex/general)",
     )
     person_type: PersonTypeEnum = Field(
         default=PersonTypeEnum.Adult,
-        description="Target audience: Adult, Child, or Any",
+        description="Exactly one of 'Adult' or 'Child'",
     )
 
 
@@ -57,9 +73,16 @@ class GeminiExtractionResponse(BaseModel):
     )
 
 
+class ServiceRecommendation(BaseModel):
+    """Recommended service candidate retrieved from MongoDB."""
+    serviceId: str
+    serviceName: str
+    score: Optional[float] = None
+    similarity_percentage: Optional[int] = None
+
+
 class VariationRecommendation(BaseModel):
     """Recommended variation candidate retrieved from MongoDB."""
-    serviceId: Optional[str] = None
     variationId: Optional[str] = None
     variationName: str
     score: Optional[float] = None
@@ -69,7 +92,7 @@ class VariationRecommendation(BaseModel):
 class ProcessedMenuItem(BaseModel):
     """An extracted menu item together with top-5 database recommendations for both service and variation."""
     extracted: ExtractedMenuItem
-    service_recommendations: list[VariationRecommendation] = Field(
+    service_recommendations: list[ServiceRecommendation] = Field(
         default_factory=list,
         description="Top 5 recommended service matches from salonservices collection",
     )
@@ -113,6 +136,7 @@ class VariationSearchRequest(BaseModel):
     """Request to search/query MongoDB variations dynamically."""
     query: str
     top_k: int = Field(default=5, ge=1, le=20)
+    service_id: Optional[str] = Field(default=None, description="Optional serviceId to restrict variation search to a specific service")
 
 
 class ConfirmedItemPayload(BaseModel):

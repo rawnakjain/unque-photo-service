@@ -7,6 +7,7 @@ from typing import Optional
 from service_testing.schemas import (
     MenuProcessingResponse,
     ProcessedMenuItem,
+    ServiceRecommendation,
     VariationRecommendation,
 )
 from service_testing.services.fuzzy_search import FuzzySearchService
@@ -35,10 +36,12 @@ class MenuProcessorService:
     ) -> MenuProcessingResponse:
         """
         1. Calls Gemini to extract items from image (includes canonical_service_name from whitelist).
-        2. For each extracted item, fuzzy search service in salonservices collection to get serviceId.
-        3. For each extracted item, fuzzy search variation in salonservicevariations collection.
-        4. Applies 80% confidence threshold to both services and variations.
-        5. Returns items with serviceId, service name, and variation recommendations.
+        2. For each extracted item, determine the service lookup name using priority:
+           canonical_service_name > recommended_new_service_name > service
+        3. Fuzzy search service in salonservices collection to get serviceId.
+        4. Fuzzy search variation in salonservicevariations collection (global, not restricted by service).
+        5. Applies 80% confidence threshold to both services and variations.
+        6. Returns items with serviceId, service name, and variation recommendations (separate lists).
         """
         start_time = time.time()
 
@@ -50,22 +53,34 @@ class MenuProcessorService:
         processed_items: list[ProcessedMenuItem] = []
 
         for item in extraction_res.items:
-            # Service name from Gemini (canonical_service_name from whitelist, fallback to service)
-            canonical_name = item.canonical_service_name or item.service
+            # Determine service lookup name using priority:
+            # 1. canonical_service_name (whitelist match)
+            # 2. recommended_new_service_name (new service candidate)
+            # 3. service (extracted base category)
+            service_lookup_name = (
+                item.canonical_service_name
+                or item.recommended_new_service_name
+                or item.service
+            )
 
             # Step 1: Fuzzy Search for service in salonservices collection to get serviceId
-            service_recs: list[VariationRecommendation] = []
-            if canonical_name:
+            service_recs: list[ServiceRecommendation] = []
+            if service_lookup_name:
                 try:
                     service_recs = self.fuzzy_search.recommend_services(
-                        query=canonical_name,
+                        query=service_lookup_name,
                         top_k=top_k_recommendations,
                         min_confidence=MIN_CONFIDENCE,
                     )
                 except Exception as e:
-                    logger.error(f"Error searching services for '{canonical_name}': {e}")
+                    logger.error(f"Error searching services for '{service_lookup_name}': {e}")
 
-            # Step 2: Fuzzy Search for variation in salonservicevariations collection
+            # Select top service match - serviceId comes ONLY from service recommendations
+            top_service = service_recs[0] if service_recs else None
+            selected_service_id = top_service.serviceId if top_service else None
+            selected_service_name = top_service.serviceName if top_service else service_lookup_name
+
+            # Step 2: Fuzzy Search for variation in salonservicevariations collection (global search)
             variation_query = item.variation_name.strip()
             variation_recs: list[VariationRecommendation] = []
             if variation_query:
@@ -78,36 +93,29 @@ class MenuProcessorService:
                 except Exception as e:
                     logger.error(f"Error searching variations for '{variation_query}': {e}")
 
-            # Combined recommendations for backwards compatibility
-            all_recommendations = service_recs + variation_recs
-            all_recommendations.sort(key=lambda x: x.similarity_percentage or 0, reverse=True)
-            combined_recs = all_recommendations[:top_k_recommendations]
-
-            # If no recommendations meet confidence threshold, provide fallback
-            if not combined_recs:
-                logger.warning(f"No recommendations above {MIN_CONFIDENCE}% confidence for service='{canonical_name}', variation='{variation_query}'")
-                combined_recs = [
-                    VariationRecommendation(
-                        variationName=variation_query or canonical_name,
-                        score=0.0,
-                        similarity_percentage=0,
-                    )
-                ]
-
-            top_service = service_recs[0] if service_recs else None
+            # Select top variation match
             top_variation = variation_recs[0] if variation_recs else None
-            top_combined = combined_recs[0] if combined_recs else None
+            selected_variation_id = top_variation.variationId if top_variation else None
+            selected_variation_name = top_variation.variationName if top_variation else variation_query
+
+            # No combined recommendations - keep service and variation separate
+            # Provide fallback only if no recommendations at all
+            if not service_recs and not variation_recs:
+                logger.warning(
+                    f"No recommendations above {MIN_CONFIDENCE}% confidence for "
+                    f"service='{service_lookup_name}', variation='{variation_query}'"
+                )
 
             processed_items.append(
                 ProcessedMenuItem(
                     extracted=item,
                     service_recommendations=service_recs,
                     variation_recommendations=variation_recs,
-                    recommendations=combined_recs,
-                    selected_service_id=top_service.serviceId if top_service else (top_combined.serviceId if top_combined else None),
-                    selected_service_name=top_service.variationName if top_service else canonical_name,
-                    selected_variation_id=top_variation.variationId if top_variation else (top_combined.variationId if top_combined else None),
-                    selected_variation_name=top_variation.variationName if top_variation else (top_combined.variationName if top_combined else variation_query),
+                    recommendations=[],  # Deprecated - keep empty
+                    selected_service_id=selected_service_id,
+                    selected_service_name=selected_service_name,
+                    selected_variation_id=selected_variation_id,
+                    selected_variation_name=selected_variation_name,
                 )
             )
 
