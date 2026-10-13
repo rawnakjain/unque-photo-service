@@ -17,8 +17,8 @@ class PersonTypeEnum(str, Enum):
 
 
 class PriceTypeEnum(str, Enum):
-    fixed = "fixed"
-    starting = "starting"
+    fixed = "FIXED"
+    starting = "RANGE"
 
 
 class ExtractedMenuItem(BaseModel):
