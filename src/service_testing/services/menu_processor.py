@@ -1,7 +1,9 @@
 """Orchestrator combining Gemini Vision extraction and MongoDB Atlas Fuzzy Search for services and variations."""
 
 import logging
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from service_testing.schemas import (
@@ -16,6 +18,7 @@ from service_testing.services.gemini_extractor import GeminiExtractorService
 logger = logging.getLogger(__name__)
 
 MIN_CONFIDENCE = 80
+MAX_FUZZY_WORKERS = 8
 
 
 class MenuProcessorService:
@@ -26,6 +29,9 @@ class MenuProcessorService:
     ):
         self.gemini_extractor = gemini_extractor or GeminiExtractorService()
         self.fuzzy_search = fuzzy_search or FuzzySearchService()
+        self._executor = ThreadPoolExecutor(
+            max_workers=MAX_FUZZY_WORKERS, thread_name_prefix="fuzzy"
+        )
 
     def process_menu_image(
         self,
@@ -43,78 +49,92 @@ class MenuProcessorService:
         5. Applies an 80% lexical-similarity threshold to services and variations.
         6. Returns items with serviceId, service name, and variation recommendations (separate lists).
         """
-        start_time = time.time()
+        start_time = time.perf_counter()
 
+        gemini_start = time.perf_counter()
         extraction_res = self.gemini_extractor.extract_from_image(
             image_bytes=image_bytes,
             mime_type=mime_type,
         )
+        gemini_ms = (time.perf_counter() - gemini_start) * 1000
 
         processed_items: list[ProcessedMenuItem] = []
+        service_search_ms = 0.0
+        variation_search_ms = 0.0
+        fuzzy_phase_ms = 0.0
 
-        for item in extraction_res.items:
-            # Determine service lookup name using priority:
-            # 1. canonical_service_name (whitelist match)
-            # 2. recommended_new_service_name (new service candidate)
-            # 3. service (extracted base category)
-            service_lookup_name = (
-                item.canonical_service_name
-                or item.recommended_new_service_name
-                or item.service
-            )
+        items = extraction_res.items
 
-            # Step 1: Fuzzy Search for service in salonservices collection to get serviceId
-            service_recs: list[ServiceRecommendation] = []
-            if service_lookup_name:
-                try:
-                    service_recs = self.fuzzy_search.recommend_services(
-                        query=service_lookup_name,
-                        top_k=top_k_recommendations,
-                        min_confidence=MIN_CONFIDENCE,
-                    )
-                except Exception:
-                    logger.exception("Error searching services for '%s'", service_lookup_name)
+        if items:
+            # Warm up the Mongo client / Atlas Search before parallel queries.
+            self.fuzzy_search.check_connection()
 
-            # Select top service match - serviceId comes ONLY from service recommendations
-            top_service = service_recs[0] if service_recs else None
-            selected_service_id = top_service.serviceId if top_service else None
-            selected_service_name = top_service.serviceName if top_service else service_lookup_name
+            service_cache: dict[str, list[ServiceRecommendation]] = {}
+            cache_lock = threading.Lock()
 
-            # Step 2: Search variations within the selected service when possible.
-            # This prevents an identically named variation from another service
-            # being selected. If no service matched, the search remains global.
-            variation_query = item.variation_name.strip()
-            variation_recs: list[VariationRecommendation] = []
-            if variation_query:
-                try:
-                    variation_recs = self.fuzzy_search.recommend_variations(
-                        query=variation_query,
-                        top_k=top_k_recommendations,
-                        min_confidence=MIN_CONFIDENCE,
-                        service_id=selected_service_id,
-                    )
-                except Exception:
-                    logger.exception(
-                        "Error searching variations for '%s' (service_id=%s)",
-                        variation_query,
-                        selected_service_id,
-                    )
-
-            # Select top variation match
-            top_variation = variation_recs[0] if variation_recs else None
-            selected_variation_id = top_variation.variationId if top_variation else None
-            selected_variation_name = top_variation.variationName if top_variation else variation_query
-
-            # No combined recommendations - keep service and variation separate
-            # Provide fallback only if no recommendations at all
-            if not service_recs and not variation_recs:
-                logger.warning(
-                    f"No recommendations above {MIN_CONFIDENCE}% confidence for "
-                    f"service='{service_lookup_name}', variation='{variation_query}'"
+            def process_one(item):
+                service_lookup_name = (
+                    item.canonical_service_name
+                    or item.recommended_new_service_name
+                    or item.service
                 )
 
-            processed_items.append(
-                ProcessedMenuItem(
+                s_ms = 0.0
+                service_recs: list[ServiceRecommendation] = []
+                if service_lookup_name:
+                    cache_key = service_lookup_name.strip().lower()
+                    with cache_lock:
+                        cache_hit = cache_key in service_cache
+                        service_recs = service_cache.get(cache_key, [])
+                    if not cache_hit:
+                        _t0 = time.perf_counter()
+                        try:
+                            service_recs = self.fuzzy_search.recommend_services(
+                                query=service_lookup_name,
+                                top_k=top_k_recommendations,
+                                min_confidence=MIN_CONFIDENCE,
+                            )
+                        except Exception:
+                            logger.exception("Error searching services for '%s'", service_lookup_name)
+                        s_ms = (time.perf_counter() - _t0) * 1000
+                        with cache_lock:
+                            service_cache[cache_key] = service_recs
+
+                top_service = service_recs[0] if service_recs else None
+                selected_service_id = top_service.serviceId if top_service else None
+                selected_service_name = top_service.serviceName if top_service else service_lookup_name
+
+                variation_query = item.variation_name.strip()
+                v_ms = 0.0
+                variation_recs: list[VariationRecommendation] = []
+                if variation_query:
+                    _t0 = time.perf_counter()
+                    try:
+                        variation_recs = self.fuzzy_search.recommend_variations(
+                            query=variation_query,
+                            top_k=top_k_recommendations,
+                            min_confidence=MIN_CONFIDENCE,
+                            service_id=selected_service_id,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Error searching variations for '%s' (service_id=%s)",
+                            variation_query,
+                            selected_service_id,
+                        )
+                    v_ms = (time.perf_counter() - _t0) * 1000
+
+                top_variation = variation_recs[0] if variation_recs else None
+                selected_variation_id = top_variation.variationId if top_variation else None
+                selected_variation_name = top_variation.variationName if top_variation else variation_query
+
+                if not service_recs and not variation_recs:
+                    logger.warning(
+                        f"No recommendations above {MIN_CONFIDENCE}% confidence for "
+                        f"service='{service_lookup_name}', variation='{variation_query}'"
+                    )
+
+                processed = ProcessedMenuItem(
                     extracted=item,
                     service_recommendations=service_recs,
                     variation_recommendations=variation_recs,
@@ -124,9 +144,41 @@ class MenuProcessorService:
                     selected_variation_id=selected_variation_id,
                     selected_variation_name=selected_variation_name,
                 )
-            )
+                return processed, s_ms, v_ms
 
-        duration = time.time() - start_time
+            fuzzy_phase_start = time.perf_counter()
+            results = list(self._executor.map(process_one, items))
+            fuzzy_phase_ms = (time.perf_counter() - fuzzy_phase_start) * 1000
+
+            for processed, s_ms, v_ms in results:
+                processed_items.append(processed)
+                service_search_ms += s_ms
+                variation_search_ms += v_ms
+
+        duration = time.perf_counter() - start_time
+        fuzzy_total_ms = service_search_ms + variation_search_ms
+
+        stage_timings = {
+            "gemini_extraction_ms": round(gemini_ms, 1),
+            "fuzzy_phase_wall_ms": round(fuzzy_phase_ms, 1),
+            "fuzzy_service_search_ms": round(service_search_ms, 1),
+            "fuzzy_variation_search_ms": round(variation_search_ms, 1),
+            "fuzzy_search_total_ms": round(fuzzy_total_ms, 1),
+            "backend_total_ms": round(duration * 1000, 1),
+            "items_processed": len(processed_items),
+        }
+
+        logger.info(
+            "[stage-timing] gemini=%.1fms fuzzy_phase_wall=%.1fms fuzzy_services=%.1fms "
+            "fuzzy_variations=%.1fms fuzzy_total=%.1fms backend_total=%.1fms items=%d",
+            gemini_ms,
+            fuzzy_phase_ms,
+            service_search_ms,
+            variation_search_ms,
+            fuzzy_total_ms,
+            duration * 1000,
+            len(processed_items),
+        )
 
         return MenuProcessingResponse(
             image_filename=filename,
@@ -134,4 +186,5 @@ class MenuProcessorService:
             items=processed_items,
             processing_time_seconds=round(duration, 2),
             gemini_model_used=self.gemini_extractor.model_name,
+            stage_timings=stage_timings,
         )

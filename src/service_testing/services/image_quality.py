@@ -2,6 +2,7 @@
 
 import io
 import logging
+import time
 from typing import Tuple
 
 import cv2
@@ -34,15 +35,20 @@ def validate_image_quality(
     Returns:
         Tuple of (is_valid, error_message)
     """
+    _t_start = time.perf_counter()
+
     # Check 1: Basic corruption - can PIL open it?
+    _t0 = time.perf_counter()
     try:
         pil_image = Image.open(io.BytesIO(image_bytes))
         pil_image.verify()  # Verify integrity
     except Exception as e:
         logger.warning(f"Image corruption detected: {e}")
         return False, "Image is corrupted or invalid"
+    _t_verify = (time.perf_counter() - _t0) * 1000
 
     # Re-open for further checks (verify() consumes the stream)
+    _t0 = time.perf_counter()
     try:
         pil_image = Image.open(io.BytesIO(image_bytes))
         pil_image.load()
@@ -50,6 +56,7 @@ def validate_image_quality(
     except Exception as e:
         logger.warning(f"Image dimension check failed: {e}")
         return False, "Image is corrupted or invalid"
+    _t_reload = (time.perf_counter() - _t0) * 1000
 
     # Check 2: Dimension bounds
     if width < min_dimension or height < min_dimension:
@@ -61,6 +68,7 @@ def validate_image_quality(
         return False, f"Image dimensions too large (maximum {max_dimension}x{max_dimension}px)"
 
     # Check 3: Blur detection using OpenCV Laplacian variance
+    _t0 = time.perf_counter()
     try:
         # Normalize grayscale, RGB, and alpha-channel images before OpenCV conversion.
         rgb_image = pil_image.convert("RGB")
@@ -80,6 +88,15 @@ def validate_image_quality(
         logger.warning(f"Blur detection failed: {e}")
         # Don't fail on blur detection errors, just log and continue
         pass
+    _t_blur = (time.perf_counter() - _t0) * 1000
+
+    logger.info(
+        "[stage-timing] image_validation: verify=%.1fms reload=%.1fms blur=%.1fms total=%.1fms",
+        _t_verify,
+        _t_reload,
+        _t_blur,
+        (time.perf_counter() - _t_start) * 1000,
+    )
 
     return True, ""
 

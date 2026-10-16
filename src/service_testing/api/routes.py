@@ -1,6 +1,7 @@
 """FastAPI routes for salon menu extraction and service/variation matching."""
 
 import logging
+import time
 from typing import Optional
 from fastapi import APIRouter, File, HTTPException, UploadFile, status
 
@@ -53,6 +54,7 @@ async def extract_and_match_menu(
         content = await file.read()
 
         # Validate image quality (blur/corruption detection)
+        _t0 = time.perf_counter()
         try:
             check_image_quality_or_raise(content)
         except ImageQualityError as iqe:
@@ -60,6 +62,7 @@ async def extract_and_match_menu(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=str(iqe),
             )
+        validation_ms = (time.perf_counter() - _t0) * 1000
 
         mime_type = file.content_type or "image/jpeg"
         processor = get_menu_processor()
@@ -70,6 +73,9 @@ async def extract_and_match_menu(
             mime_type=mime_type,
             top_k_recommendations=5,
         )
+        if response.stage_timings is None:
+            response.stage_timings = {}
+        response.stage_timings["image_validation_ms"] = round(validation_ms, 1)
         return response
 
     except HTTPException:
@@ -107,6 +113,7 @@ async def media_service_image_to_text(
         content = await file.read()
 
         # Validate image quality (blur/corruption detection)
+        _t0 = time.perf_counter()
         try:
             check_image_quality_or_raise(content)
         except ImageQualityError as iqe:
@@ -114,6 +121,8 @@ async def media_service_image_to_text(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=str(iqe),
             )
+        validation_ms = (time.perf_counter() - _t0) * 1000
+        logger.info("[stage-timing] media image_validation=%.1fms", validation_ms)
 
         mime_type = file.content_type or "image/jpeg"
         processor = get_menu_processor()
@@ -160,7 +169,9 @@ async def media_service_image_to_text(
 
             media_items.append(MediaServiceItem(recommendedVariations=[recommended_variation]))
 
-        return MediaServiceResponse(data=media_items, errors={})
+        stage_timings = dict(result.stage_timings or {})
+        stage_timings["image_validation_ms"] = round(validation_ms, 1)
+        return MediaServiceResponse(data=media_items, errors={}, stage_timings=stage_timings)
 
     except HTTPException:
         raise

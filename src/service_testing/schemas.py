@@ -130,6 +130,7 @@ class MenuProcessingResponse(BaseModel):
     items: list[ProcessedMenuItem]
     processing_time_seconds: float
     gemini_model_used: str
+    stage_timings: Optional[dict] = None
 
 
 class VariationSearchRequest(BaseModel):
@@ -191,3 +192,4 @@ class MediaServiceResponse(BaseModel):
     """Response for media service image-to-text endpoint."""
     data: list[MediaServiceItem] = Field(default_factory=list)
     errors: dict = Field(default_factory=dict)
+    stage_timings: Optional[dict] = None

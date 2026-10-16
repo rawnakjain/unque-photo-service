@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-2.5-flash"
     gcp_project_id: str = "magnetic-alloy-448111-e7"
     gcp_location: str = "us-central1"
+    gemini_max_image_dim: int = 2000
+    gemini_thinking_budget: int = 0
+    gemini_media_resolution: str = "MEDIUM"
 
     # MongoDB Atlas settings
     mongodb_uri: str

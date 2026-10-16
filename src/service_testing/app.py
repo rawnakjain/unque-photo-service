@@ -1,5 +1,6 @@
 """FastAPI application factory and static file serving."""
 
+import logging
 from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,6 +10,11 @@ from fastapi.staticfiles import StaticFiles
 from service_testing.api.routes import router as api_router
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 
 
 def create_app() -> FastAPI:

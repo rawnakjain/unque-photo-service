@@ -7,7 +7,18 @@ from typing import Optional
 from PIL import Image
 
 from google import genai
-from google.genai.types import Part, GenerateContentConfig
+from google.genai.types import (
+    Part,
+    GenerateContentConfig,
+    ThinkingConfig,
+    MediaResolution,
+)
+
+_MEDIA_RESOLUTION = {
+    "LOW": MediaResolution.MEDIA_RESOLUTION_LOW,
+    "MEDIUM": MediaResolution.MEDIA_RESOLUTION_MEDIUM,
+    "HIGH": MediaResolution.MEDIA_RESOLUTION_HIGH,
+}
 
 from service_testing.config import settings
 from service_testing.schemas import ExtractedMenuItem, GeminiExtractionResponse
@@ -169,6 +180,14 @@ class GeminiExtractorService:
                 if image.mode not in ("RGB", "L"):
                     image = image.convert("RGB")
 
+            max_dim = settings.gemini_max_image_dim
+            width, height = image.size
+            if max_dim > 0 and max(width, height) > max_dim:
+                scale = max_dim / float(max(width, height))
+                new_size = (max(1, int(width * scale)), max(1, int(height * scale)))
+                image = image.resize(new_size, Image.LANCZOS)
+                logger.info("Downscaled image from %sx%s to %sx%s", width, height, *new_size)
+
             format_to_mime = {
                 "JPEG": "image/jpeg",
                 "JPG": "image/jpeg",
@@ -196,14 +215,22 @@ class GeminiExtractorService:
 
         try:
             logger.info(f"Invoking Gemini model {self.model_name} for image menu extraction...")
+            gen_config = GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=GeminiExtractionResponse,
+                temperature=0.1,
+                thinking_config=ThinkingConfig(thinking_budget=settings.gemini_thinking_budget),
+            )
+            media_resolution = _MEDIA_RESOLUTION.get(
+                (settings.gemini_media_resolution or "").strip().upper()
+            )
+            if media_resolution is not None:
+                gen_config.media_resolution = media_resolution
+
             response = self.client.models.generate_content(
                 model=self.model_name,
                 contents=[EXTRACTION_PROMPT_TEMPLATE, image_part],
-                config=GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=GeminiExtractionResponse,
-                    temperature=0.1,
-                ),
+                config=gen_config,
             )
 
             response_text = response.text
