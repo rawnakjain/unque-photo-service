@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     gcp_location: str = "us-central1"
 
     # MongoDB Atlas settings
-    mongodb_uri: str = "mongodb+srv://praunak_db_user:mXxGITnLvIwEaRiB@photo-service.1sd1wva.mongodb.net/?appName=photo-service"
+    mongodb_uri: str
     mongodb_db_name: str = "Unque"
 
     # Collections for fuzzy search
