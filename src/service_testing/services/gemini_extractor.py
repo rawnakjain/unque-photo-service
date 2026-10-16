@@ -160,19 +160,38 @@ class GeminiExtractorService:
     def extract_from_image(self, image_bytes: bytes, mime_type: str = "image/jpeg") -> GeminiExtractionResponse:
         """Sends menu image to Gemini with structured schema output."""
 
-        # Open with PIL to validate image integrity
+        # Validate, normalize color mode, and serialize the actual image sent to Gemini.
         try:
-            image = Image.open(io.BytesIO(image_bytes))
-            # Format image to RGB if needed
-            if image.mode not in ("RGB", "L"):
-                image = image.convert("RGB")
-        except Exception as e:
-            raise ValueError(f"Invalid image file uploaded: {e}")
+            with Image.open(io.BytesIO(image_bytes)) as source_image:
+                source_image.load()
+                detected_format = (source_image.format or "").upper()
+                image = source_image.copy()
+                if image.mode not in ("RGB", "L"):
+                    image = image.convert("RGB")
 
-        # Prepare Part using google-genai SDK
+            format_to_mime = {
+                "JPEG": "image/jpeg",
+                "JPG": "image/jpeg",
+                "PNG": "image/png",
+                "WEBP": "image/webp",
+            }
+            # Normalize unsupported formats to JPEG so bytes and MIME always agree.
+            normalized_mime = format_to_mime.get(detected_format, "image/jpeg")
+            output_format = {
+                "image/jpeg": "JPEG",
+                "image/png": "PNG",
+                "image/webp": "WEBP",
+            }.get(normalized_mime, "JPEG")
+
+            normalized_buffer = io.BytesIO()
+            image.save(normalized_buffer, format=output_format)
+            normalized_image_bytes = normalized_buffer.getvalue()
+        except Exception as e:
+            raise ValueError(f"Invalid image file uploaded: {e}") from e
+
         image_part = Part.from_bytes(
-            data=image_bytes,
-            mime_type=mime_type,
+            data=normalized_image_bytes,
+            mime_type=normalized_mime,
         )
 
         try:
@@ -188,14 +207,47 @@ class GeminiExtractorService:
             )
 
             response_text = response.text
-            print(response_text)
             logger.info("Received structured extraction from Gemini.")
 
             if not response_text:
                 return GeminiExtractionResponse(items=[])
 
             data = json.loads(response_text)
-            return GeminiExtractionResponse.model_validate(data)
+            extraction = GeminiExtractionResponse.model_validate(data)
+
+            # Prompt instructions alone are not validation. Enforce the canonical
+            # service whitelist in application code before downstream matching.
+            allowed_service_names = {
+                "Basic Cleanup Facial", "Beard Colour", "Beard Shaving", "Beard Spa",
+                "Beard Styling", "Bleach", "Blow Dry", "Body Spa", "Cleansing",
+                "Curls And Waves", "D Tan", "Dandruff Treatment", "Deep Facial",
+                "Face Wash", "Hair Colouring Entire Hair", "Hair Colouring Root Touch Up",
+                "Hair Conditioning", "Hair Detoxifying", "Hair Extensions",
+                "Hair Highlighting", "Hair Patch", "Hair Revive Treatment", "Hair Smoothing",
+                "Hair Spa", "Hair Straightening", "Hair Wash", "Haircut",
+                "Hairstyle By Arrangement", "Laser Hair Removal", "Makeup", "Manicure",
+                "Mask", "Massage", "Moustache Colour", "Nails Art", "Nails Extensions",
+                "Nails Overlays", "Nails Polish", "Nails Removal", "Pedicure",
+                "Saree Draping", "Scrubbing", "Skin Treatment", "Threading", "Trimming",
+                "Waxing", "Nails Basic Care", "Mehendi", "Bond Care Treatment",
+                "W One Nanoplastia", "Protein Treatment", "Vegan Botox",
+                "Curl Softening Treatment", "Balayage", "Temporary Ironing",
+                "Adult Haircut", "Child Haircut", "Beard Care", "Gel Overlay",
+                "Tattoo", "Piercing", "PMU", "Bridal", "Academy",
+            }
+            for item in extraction.items:
+                canonical = (item.canonical_service_name or "").strip()
+                if canonical not in allowed_service_names:
+                    item.canonical_service_name = None
+                    if not (item.recommended_new_service_name or "").strip():
+                        item.recommended_new_service_name = item.service.strip() or None
+                else:
+                    item.canonical_service_name = canonical
+                    item.recommended_new_service_name = None
+                if not item.service.strip() or not item.variation_name.strip():
+                    raise ValueError("Gemini returned an item with an empty service or variation_name.")
+
+            return extraction
 
         except Exception as e:
             logger.error(f"Gemini extraction failed: {e}")

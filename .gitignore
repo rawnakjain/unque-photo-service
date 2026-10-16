@@ -6,6 +6,13 @@ dist/
 wheels/
 *.egg-info
 
+# Test caches
+.pytest_cache/
+
+# Logs
+*.log
+server.log
+
 # Virtual environments
 .venv
 

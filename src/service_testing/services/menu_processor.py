@@ -39,8 +39,8 @@ class MenuProcessorService:
         2. For each extracted item, determine the service lookup name using priority:
            canonical_service_name > recommended_new_service_name > service
         3. Fuzzy search service in salonservices collection to get serviceId.
-        4. Fuzzy search variation in salonservicevariations collection (global, not restricted by service).
-        5. Applies 80% confidence threshold to both services and variations.
+        4. Search variations within the matched service when a serviceId is available.
+        5. Applies an 80% lexical-similarity threshold to services and variations.
         6. Returns items with serviceId, service name, and variation recommendations (separate lists).
         """
         start_time = time.time()
@@ -72,15 +72,17 @@ class MenuProcessorService:
                         top_k=top_k_recommendations,
                         min_confidence=MIN_CONFIDENCE,
                     )
-                except Exception as e:
-                    logger.error(f"Error searching services for '{service_lookup_name}': {e}")
+                except Exception:
+                    logger.exception("Error searching services for '%s'", service_lookup_name)
 
             # Select top service match - serviceId comes ONLY from service recommendations
             top_service = service_recs[0] if service_recs else None
             selected_service_id = top_service.serviceId if top_service else None
             selected_service_name = top_service.serviceName if top_service else service_lookup_name
 
-            # Step 2: Fuzzy Search for variation in salonservicevariations collection (global search)
+            # Step 2: Search variations within the selected service when possible.
+            # This prevents an identically named variation from another service
+            # being selected. If no service matched, the search remains global.
             variation_query = item.variation_name.strip()
             variation_recs: list[VariationRecommendation] = []
             if variation_query:
@@ -89,9 +91,14 @@ class MenuProcessorService:
                         query=variation_query,
                         top_k=top_k_recommendations,
                         min_confidence=MIN_CONFIDENCE,
+                        service_id=selected_service_id,
                     )
-                except Exception as e:
-                    logger.error(f"Error searching variations for '{variation_query}': {e}")
+                except Exception:
+                    logger.exception(
+                        "Error searching variations for '%s' (service_id=%s)",
+                        variation_query,
+                        selected_service_id,
+                    )
 
             # Select top variation match
             top_variation = variation_recs[0] if variation_recs else None

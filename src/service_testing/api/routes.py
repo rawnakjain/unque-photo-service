@@ -1,4 +1,4 @@
-"""FastAPI API routes for salon menu extraction and fuzzy search (variations only)."""
+"""FastAPI routes for salon menu extraction and service/variation matching."""
 
 import logging
 from typing import Optional
@@ -6,7 +6,6 @@ from fastapi import APIRouter, File, HTTPException, UploadFile, status
 
 from service_testing.schemas import (
     MenuProcessingResponse,
-    VariationRecommendation,
     MediaServiceResponse,
     MediaServiceItem,
     RecommendedVariation,
@@ -37,12 +36,13 @@ async def extract_and_match_menu(
     """
     Upload a menu image/catalogue.
     1. Extracts services & variations with Gemini Flash (services mapped to whitelist).
-    2. Performs Atlas Fuzzy Search on salonservicevariations for variations only.
-    3. Applies 80% confidence threshold.
+    2. Matches the extracted service to the salonservices collection.
+    3. Searches variations, scoped to the matched service when possible.
+    4. Applies an 80% lexical-similarity threshold.
     4. Returns structured items with canonical_service_name and variation recommendations.
     """
     if not file.content_type or not (
-        file.content_type.startswith("image/") or file.filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))
+        file.content_type.startswith("image/") or (file.filename or "").lower().endswith((".png", ".jpg", ".jpeg", ".webp"))
     ):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -72,6 +72,8 @@ async def extract_and_match_menu(
         )
         return response
 
+    except HTTPException:
+        raise
     except ValueError as ve:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
     except Exception as e:
@@ -94,7 +96,7 @@ async def media_service_image_to_text(
     4. Returns nested structure with recommendedVariations and variationRecommendations.
     """
     if not file.content_type or not (
-        file.content_type.startswith("image/") or file.filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))
+        file.content_type.startswith("image/") or (file.filename or "").lower().endswith((".png", ".jpg", ".jpeg", ".webp"))
     ):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -160,6 +162,8 @@ async def media_service_image_to_text(
 
         return MediaServiceResponse(data=media_items, errors={})
 
+    except HTTPException:
+        raise
     except ValueError as ve:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
     except Exception as e:

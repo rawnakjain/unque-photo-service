@@ -45,6 +45,7 @@ def validate_image_quality(
     # Re-open for further checks (verify() consumes the stream)
     try:
         pil_image = Image.open(io.BytesIO(image_bytes))
+        pil_image.load()
         width, height = pil_image.size
     except Exception as e:
         logger.warning(f"Image dimension check failed: {e}")
@@ -61,8 +62,9 @@ def validate_image_quality(
 
     # Check 3: Blur detection using OpenCV Laplacian variance
     try:
-        # Convert PIL to OpenCV format
-        cv_image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+        # Normalize grayscale, RGB, and alpha-channel images before OpenCV conversion.
+        rgb_image = pil_image.convert("RGB")
+        cv_image = cv2.cvtColor(np.array(rgb_image), cv2.COLOR_RGB2BGR)
         gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
         
         # Calculate Laplacian variance (focus measure)

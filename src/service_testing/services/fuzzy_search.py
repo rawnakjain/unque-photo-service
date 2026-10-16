@@ -316,76 +316,67 @@ class FuzzySearchService:
                 }
             ]
 
-        # Add service_id filter if provided
-        filter_clauses = []
+        # Apply service_id as a regular MongoDB match after Atlas Search.
+        # Do not use Atlas Search `equals` here: `serviceId` is not mapped as
+        # a `token` field in the current Atlas Search index, which causes errors.
+        pipeline = [
+            {
+                "$search": {
+                    "index": settings.salonservicevariations_text_index,
+                    "compound": {
+                        "should": search_clauses,
+                        "minimumShouldMatch": 1,
+                    },
+                }
+            }
+        ]
+
+        # Filter before score filtering, projection, and limit so unrelated
+        # services cannot crowd out relevant variations.
         if service_id:
-            filter_clauses.append({"equals": {"path": "serviceId", "value": service_id}})
+            pipeline.append({"$match": {"serviceId": service_id}})
 
-        compound_query = {
-            "should": search_clauses,
-            "minimumShouldMatch": 1
-        }
-        if filter_clauses:
-            compound_query["filter"] = filter_clauses
+        pipeline.extend([
+            {"$addFields": {"searchScore": {"$meta": "searchScore"}}},
+            {"$match": {"searchScore": {"$gte": min_score}}},
+            {"$project": {
+                "_id": 1,
+                "salonServiceVariationId": 1,
+                "fullName": 1,
+                "price": 1,
+                "duration": 1,
+                "bufferInMins": 1,
+                "pricingType": 1,
+                "relativeIndex": 1,
+                "isCombo": 1,
+                "tagNameAndValues": 1,
+                "forGender": 1,
+                "personType": 1,
+                "genericService": 1,
+                "salonServiceId": 1,
+                "serviceId": 1,
+                "salonId": 1,
+                "serviceNameEnum": 1,
+                "salonServiceName": 1,
+                "maxPrice": 1,
+                "comment": 1,
+                "score": "$searchScore",
+            }},
+            {"$sort": {"score": -1}},
+            {"$limit": top_k * 3},
+        ])
 
-        # Try Atlas Search with filter first; if it fails (e.g., field not indexed), 
-        # fall back to search without filter and filter in Python
-        def _run_atlas_search(use_filter: bool) -> list[dict[str, Any]]:
-            query = compound_query if use_filter else {"should": search_clauses, "minimumShouldMatch": 1}
-            pipeline = [
-                {"$search": {"index": settings.salonservicevariations_text_index, "compound": query}},
-                {"$addFields": {"searchScore": {"$meta": "searchScore"}}},
-                {"$match": {"searchScore": {"$gte": min_score}}},
-                {"$project": {
-                    "_id": 1,
-                    "salonServiceVariationId": 1,
-                    "fullName": 1,
-                    "price": 1,
-                    "duration": 1,
-                    "bufferInMins": 1,
-                    "pricingType": 1,
-                    "relativeIndex": 1,
-                    "isCombo": 1,
-                    "tagNameAndValues": 1,
-                    "forGender": 1,
-                    "personType": 1,
-                    "genericService": 1,
-                    "salonServiceId": 1,
-                    "serviceId": 1,
-                    "salonId": 1,
-                    "serviceNameEnum": 1,
-                    "salonServiceName": 1,
-                    "maxPrice": 1,
-                    "comment": 1,
-                    "score": "$searchScore"
-                }},
-                {"$sort": {"score": -1}},
-                {"$limit": top_k * 3}  # Fetch more to allow post-filtering
-            ]
-            return list(coll.aggregate(pipeline))
-
-        results = []
-        if service_id:
-            # Try with filter first
-            try:
-                results = _run_atlas_search(use_filter=True)
-            except Exception as e:
-                logger.warning(f"Atlas Search with service_id filter failed: {e}. Retrying without filter.")
-                # Fall back to search without filter, then filter in Python
-                try:
-                    all_results = _run_atlas_search(use_filter=False)
-                    results = [r for r in all_results if str(r.get("serviceId", "")) == service_id]
-                except Exception as e2:
-                    logger.warning(f"Atlas Search without filter also failed: {e2}. Using regex fallback.")
-        else:
-            # No service_id filter, normal search
-            try:
-                results = _run_atlas_search(use_filter=False)
-            except Exception as e:
-                logger.warning(f"Atlas Search failed: {e}. Using regex fallback.")
-
-        if results:
-            return results
+        try:
+            results = list(coll.aggregate(pipeline))
+            if results:
+                return results
+        except Exception as e:
+            logger.warning(
+                "Atlas Search failed for variations (service_id=%s): %s. "
+                "Using regex fallback.",
+                service_id,
+                e,
+            )
 
         # Regex fallback (with optional service_id filter)
         fallback_match = _build_regex_or_conditions(cleaned_query, ["fullName", "salonServiceName", "comment"])
