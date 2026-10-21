@@ -1,9 +1,11 @@
 """FastAPI routes for salon menu extraction and service/variation matching."""
 
 import logging
+import threading
 import time
 from typing import Optional
 from fastapi import APIRouter, File, HTTPException, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 
 from service_testing.schemas import (
     MenuProcessingResponse,
@@ -19,15 +21,30 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["Salon Menu POC"])
 
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+
 # Lazy-loaded singleton services
 _menu_processor: Optional[MenuProcessorService] = None
+_menu_processor_lock = threading.Lock()
 
 
 def get_menu_processor() -> MenuProcessorService:
     global _menu_processor
     if _menu_processor is None:
-        _menu_processor = MenuProcessorService()
+        with _menu_processor_lock:
+            if _menu_processor is None:
+                _menu_processor = MenuProcessorService()
     return _menu_processor
+
+
+async def _read_upload(file: UploadFile) -> bytes:
+    content = await file.read()
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Image is too large (maximum {MAX_UPLOAD_BYTES // (1024 * 1024)}MB).",
+        )
+    return content
 
 
 @router.post("/menu/extract-and-match", response_model=MenuProcessingResponse)
@@ -51,12 +68,14 @@ async def extract_and_match_menu(
         )
 
     try:
-        content = await file.read()
+        content = await _read_upload(file)
 
-        # Validate image quality (blur/corruption detection)
+        # Validate image quality (blur/corruption detection). This and the
+        # processing below are blocking, so they run in the threadpool to keep
+        # the event loop free for concurrent requests.
         _t0 = time.perf_counter()
         try:
-            check_image_quality_or_raise(content)
+            await run_in_threadpool(check_image_quality_or_raise, content)
         except ImageQualityError as iqe:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -67,7 +86,8 @@ async def extract_and_match_menu(
         mime_type = file.content_type or "image/jpeg"
         processor = get_menu_processor()
 
-        response = processor.process_menu_image(
+        response = await run_in_threadpool(
+            processor.process_menu_image,
             image_bytes=content,
             filename=file.filename or "uploaded_menu.jpg",
             mime_type=mime_type,
@@ -110,12 +130,14 @@ async def media_service_image_to_text(
         )
 
     try:
-        content = await file.read()
+        content = await _read_upload(file)
 
-        # Validate image quality (blur/corruption detection)
+        # Validate image quality (blur/corruption detection). This and the
+        # processing below are blocking, so they run in the threadpool to keep
+        # the event loop free for concurrent requests.
         _t0 = time.perf_counter()
         try:
-            check_image_quality_or_raise(content)
+            await run_in_threadpool(check_image_quality_or_raise, content)
         except ImageQualityError as iqe:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -128,7 +150,8 @@ async def media_service_image_to_text(
         processor = get_menu_processor()
 
         # Process using existing logic
-        result = processor.process_menu_image(
+        result = await run_in_threadpool(
+            processor.process_menu_image,
             image_bytes=content,
             filename=file.filename or "uploaded_menu.jpg",
             mime_type=mime_type,

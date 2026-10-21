@@ -1,7 +1,7 @@
 # Salon Menu AI Onboarding POC
 
 A proof-of-concept for automating salon price menu onboarding using:
-- **Google Gemini 2.5 Flash** (Vertex AI) for multimodal menu image extraction
+- **Google Gemini 3.5 Flash-Lite** (Vertex AI) for multimodal menu image extraction
 - **MongoDB Atlas Fuzzy Search** (`$search` with fuzzy/phrase matching) for service & variation matching
 - **FastAPI** backend with a **Vercel Design System** styled web UI
 
@@ -29,8 +29,8 @@ A proof-of-concept for automating salon price menu onboarding using:
 
 ```
 ┌─────────────────┐    ┌────────────────────────────┐    ┌──────────────────────┐
-│   Menu Image    │───▶│ Gemini 2.5 Flash Extraction│───▶│ Extracted Items      │
-│ (Upload via UI) │    │ (Structured JSON Output)   │    │ + Variation Names    │
+│   Menu Image    │───▶│ Gemini Flash-Lite Extract. │───▶│ Extracted Items      │
+│ (Upload via UI) │    │ (streamed line format)     │    │ + Variation Names    │
 └─────────────────┘    └────────────────────────────┘    └──────────────────────┘
                                                                      │
                                                                      ▼
@@ -72,10 +72,10 @@ A proof-of-concept for automating salon price menu onboarding using:
 | 3 | `src/service_testing/config.py` | Pydantic Settings: Gemini/Vertex AI, MongoDB URI, collection & index names |
 | 4 | `src/service_testing/schemas.py` | Pydantic models for all request/response structures |
 | 5 | `src/service_testing/constants.py` | Standard service categories used in the extraction prompt |
-| 6 | `src/service_testing/services/gemini_extractor.py` | `GeminiExtractorService` – sends the menu image to Gemini with a structured prompt and returns `ExtractedMenuItem`s |
+| 6 | `src/service_testing/services/gemini_extractor.py` | `GeminiExtractorService` – streams the menu image through Gemini in a compact line format, parses items as they arrive (`MenuLineParser`), with retries, hedging and a fallback model |
 | 7 | `src/service_testing/services/fuzzy_search.py` | `FuzzySearchService` – Atlas `$search` with fuzzy/phrase clauses, regex fallback, score normalization, dedup and a semantic firewall |
 | 8 | `src/service_testing/services/image_quality.py` | Blur/corruption validation before extraction |
-| 9 | `src/service_testing/services/menu_processor.py` | `MenuProcessorService` – orchestrates extraction + matching |
+| 9 | `src/service_testing/services/menu_processor.py` | `MenuProcessorService` – orchestrates extraction + matching, starting each item's matching while Gemini is still generating |
 | 10 | `src/service_testing/api/routes.py` | API endpoints |
 | 11 | `src/service_testing/static/index.html` | Alpine.js single-page UI |
 
@@ -96,13 +96,14 @@ MenuProcessorService.process_menu_image()
         ├──► GeminiExtractorService.extract_from_image()
         │       │
         │       ▼
-        │   Gemini 2.5 Flash (Vertex AI), structured JSON output
+        │   Gemini 3.5 Flash-Lite (Vertex AI), streamed "G|…"/"I|…" lines
         │       │
         │       ▼
-        │   Returns: List[ExtractedMenuItem]
+        │   Each complete line → ExtractedMenuItem, handed to the processor
+        │   immediately (matching runs while the rest is still generating)
         │
         ▼
-For each ExtractedMenuItem:
+For each ExtractedMenuItem (on a worker thread, as soon as it is parsed):
         │
         ├──► FuzzySearchService.recommend_services(service_lookup_name)
         │       │  lookup priority: canonical_service_name
@@ -118,7 +119,8 @@ For each ExtractedMenuItem:
                 │
                 ▼
             Atlas $search on salonservicevariations
-            (index: salonservicevariations_index), scoped to serviceId
+            (index: salonservicevariations_index), serviceId filter
+            applied inside $search
                 │
                 ▼
             Returns top-5 variations
@@ -182,6 +184,46 @@ similarity_percentage = int(round(normalized_score * 100))  # 0–100%
 }
 ```
 
+## Latency & Robustness
+
+Output generation dominates latency, so the pipeline is built around producing and
+consuming as few output tokens as possible, as early as possible:
+
+- **Compact line format.** Gemini answers with one `G|service|canonical|new` line per
+  service group and one `I|name|price|raw|flags|duration` line per item instead of
+  pretty-printed JSON (~5x fewer output tokens). Service-level fields are written once
+  per group and defaults are omitted. Malformed lines are skipped, not fatal.
+- **Streaming + pipelined matching.** Items are parsed while the response streams and
+  their MongoDB lookups start immediately, so matching overlaps generation and only the
+  last few lookups remain once generation ends (~40–80 ms instead of 1–3 s).
+- **Cheaper variation search.** The `serviceId` filter runs inside `$search`
+  (`compound.filter`) instead of a later `$match`, so mongod never fetches fuzzy hits
+  from other services (~3x less work per query, same scores). Ties are ordered by name
+  so identical inputs give identical results.
+- **Non-blocking API.** Validation and processing run in the threadpool, so concurrent
+  uploads are processed in parallel instead of queueing behind the event loop.
+- **Tail latency & failures.** HTTP retries with backoff for 408/429/5xx; a hedged
+  duplicate request if nothing has streamed after `GEMINI_HEDGE_AFTER_S` (first output
+  normally arrives in ~1–2 s, but occasionally queues for 8–9 s upstream); a fallback
+  model (`GEMINI_FALLBACK_MODEL`) if the primary model fails; a `max_output_tokens`
+  cap against runaway generation; MongoDB operation timeouts; 20MB upload limit.
+- **Warm start.** The MongoDB pool is opened in the background at startup.
+
+Measured on the four sample menus (Vertex AI, median of 5 runs):
+
+| Menu | Items | Before | After |
+|------|-------|--------|-------|
+| 1 | 66 | 18.1 s | 3.6 s |
+| 2 | 53 | 14.6 s | 3.1 s |
+| 3 | 13 | 5.3 s | 1.6 s |
+| 4 | 56 | 15.7 s | 2.8 s |
+
+Item/price accuracy against a hand-transcribed ground truth rose from ~82% to ~99%
+recall and precision. Four concurrent uploads finish in ~4 s instead of ~65 s.
+
+`stage_timings` in each response reports `gemini_first_token_ms`,
+`gemini_extraction_ms` and `fuzzy_phase_wall_ms` (matching time left after generation).
+
 ## Setup
 
 1. **Environment Variables** (copy `.env.example` to `.env` and fill in real values):
@@ -208,7 +250,7 @@ similarity_percentage = int(round(normalized_score * 100))  # 0–100%
 ## Technology Stack
 
 - **Backend**: FastAPI, Python 3.13
-- **AI**: Google Gemini 2.5 Flash (Vertex AI) for multimodal extraction
+- **AI**: Google Gemini 3.5 Flash-Lite (Vertex AI) for multimodal extraction
 - **Database**: MongoDB Atlas Search (fuzzy + phrase, BM25 scoring)
 - **Frontend**: Vercel Design System (Geist fonts, monochrome aesthetic), Tailwind CSS + Alpine.js (no build step)
 - **Key dependencies**: `fastapi`, `uvicorn`, `google-genai`, `pymongo`, `pillow`, `opencv-python`

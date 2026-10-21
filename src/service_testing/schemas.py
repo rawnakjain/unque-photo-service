@@ -71,6 +71,8 @@ class GeminiExtractionResponse(BaseModel):
         default_factory=list,
         description="List of menu items extracted from the image",
     )
+    model_used: Optional[str] = Field(None, description="Gemini model that produced the items")
+    first_token_ms: Optional[float] = Field(None, description="Time until Gemini streamed its first output")
 
 
 class ServiceRecommendation(BaseModel):

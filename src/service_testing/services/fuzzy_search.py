@@ -2,6 +2,7 @@
 
 import logging
 import re
+import threading
 from typing import Any, List, Optional
 import pymongo
 from pymongo.collection import Collection
@@ -77,27 +78,40 @@ class FuzzySearchService:
         self._client: pymongo.MongoClient | None = None
         self._salonservices: Collection | None = None
         self._salonservicevariations: Collection | None = None
+        self._connect_lock = threading.Lock()
 
-    def get_salonservices_collection(self) -> Collection:
-        if self._salonservices is None:
-            logger.info(f"Connecting to MongoDB Atlas: {settings.mongodb_db_name}.{settings.salonservices_collection}")
-            self._client = pymongo.MongoClient(
+    def _connect(self) -> None:
+        # Searches run on many threads at once; create the client exactly once.
+        with self._connect_lock:
+            if self._client is not None:
+                return
+            logger.info(f"Connecting to MongoDB Atlas: {settings.mongodb_db_name}")
+            client = pymongo.MongoClient(
                 settings.mongodb_uri,
                 serverSelectionTimeoutMS=10000,
+                timeoutMS=settings.mongodb_timeout_ms,
+                minPoolSize=settings.mongodb_min_pool_size,
             )
-            self._salonservices = self._client[settings.mongodb_db_name][settings.salonservices_collection]
+            db = client[settings.mongodb_db_name]
+            self._salonservices = db[settings.salonservices_collection]
+            self._salonservicevariations = db[settings.salonservicevariations_collection]
+            self._client = client
+
+    def get_salonservices_collection(self) -> Collection:
+        if self._client is None:
+            self._connect()
         return self._salonservices
 
     def get_salonservicevariations_collection(self) -> Collection:
-        if self._salonservicevariations is None:
-            logger.info(f"Connecting to MongoDB Atlas: {settings.mongodb_db_name}.{settings.salonservicevariations_collection}")
-            if self._client is None:
-                self._client = pymongo.MongoClient(
-                    settings.mongodb_uri,
-                    serverSelectionTimeoutMS=10000,
-                )
-            self._salonservicevariations = self._client[settings.mongodb_db_name][settings.salonservicevariations_collection]
+        if self._client is None:
+            self._connect()
         return self._salonservicevariations
+
+    def warm_up(self) -> None:
+        """Opens the connection pool ahead of the first request."""
+        status = self.check_connection()
+        if status.get("status") == "connected":
+            logger.info("MongoDB warm-up complete: %s", status)
 
     def check_connection(self) -> dict[str, Any]:
         """Validates connection and returns database stats."""
@@ -200,7 +214,8 @@ class FuzzySearchService:
                 "forGender": 1,
                 "score": "$searchScore"
             }},
-            {"$sort": {"score": -1}},
+            # Name/id tie-breakers keep equal-score results in a stable order.
+            {"$sort": {"score": -1, "salonServiceName": 1, "serviceId": 1}},
             {"$limit": top_k}
         ]
 
@@ -316,27 +331,26 @@ class FuzzySearchService:
                 }
             ]
 
-        # Apply service_id as a regular MongoDB match after Atlas Search.
-        # Do not use Atlas Search `equals` here: `serviceId` is not mapped as
-        # a `token` field in the current Atlas Search index, which causes errors.
+        compound: dict[str, Any] = {
+            "should": search_clauses,
+            "minimumShouldMatch": 1,
+        }
+        # Filter on service_id inside Atlas Search so unrelated services never
+        # reach mongod: filtering with a later $match fetched every fuzzy hit
+        # across all services first (~3x slower). Filter clauses don't affect
+        # scores. `equals` is not usable because `serviceId` is not mapped as a
+        # `token` field in the index; a phrase over the dynamically indexed UUID
+        # string matches it exactly.
+        if service_id:
+            compound["filter"] = [{"phrase": {"query": service_id, "path": "serviceId"}}]
+
         pipeline = [
             {
                 "$search": {
                     "index": settings.salonservicevariations_text_index,
-                    "compound": {
-                        "should": search_clauses,
-                        "minimumShouldMatch": 1,
-                    },
+                    "compound": compound,
                 }
-            }
-        ]
-
-        # Filter before score filtering, projection, and limit so unrelated
-        # services cannot crowd out relevant variations.
-        if service_id:
-            pipeline.append({"$match": {"serviceId": service_id}})
-
-        pipeline.extend([
+            },
             {"$addFields": {"searchScore": {"$meta": "searchScore"}}},
             {"$match": {"searchScore": {"$gte": min_score}}},
             {"$project": {
@@ -362,9 +376,10 @@ class FuzzySearchService:
                 "comment": 1,
                 "score": "$searchScore",
             }},
-            {"$sort": {"score": -1}},
+            # Name/id tie-breakers keep equal-score results in a stable order.
+            {"$sort": {"score": -1, "fullName": 1, "salonServiceVariationId": 1}},
             {"$limit": top_k * 3},
-        ])
+        ]
 
         try:
             results = list(coll.aggregate(pipeline))
